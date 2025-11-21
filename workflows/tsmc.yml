@@ -1,0 +1,28 @@
+name: TSMC Price Alert
+
+on:
+  schedule:
+    - cron: "0 * * * 1-5"   # 每小時整點（週一〜週五）
+  workflow_dispatch:        # 手動觸發
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install requests
+      run: pip install requests
+
+    - name: Run script
+      env:
+        LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+      run: python main.py
