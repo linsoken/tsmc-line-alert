@@ -99,7 +99,7 @@ def main():
     else:
         print(f"目前價格 {price}，未達通知條件")
         
-    send_line_message(f"📢 tsmc 今日價格為：{price} 元")
+    send_line_message(f"📢 tsmc 今日收盤價：{price} 元")
 
 if __name__ == "__main__":
     main()
