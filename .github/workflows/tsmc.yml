@@ -2,7 +2,7 @@ name: TSMC Price Alert
 
 on:
   schedule:
-    - cron: "0 * * * 1-5"   # 每小時整點（週一〜週五）
+    - cron: "0 6 * * 1-5"   # 每小時整點（週一〜週五）
   workflow_dispatch:        # 手動觸發
 
 jobs:
