@@ -98,7 +98,8 @@ def main():
         send_line_message(f"📈 台積電股價已達 {price} 元！\n（提醒門檻：{TSMC_TARGET_PRICE}）")
     else:
         print(f"目前價格 {price}，未達通知條件")
-
+        
+    send_line_message(f"📢 tsmc 今日價格為：{price} 元")
 
 if __name__ == "__main__":
     main()
