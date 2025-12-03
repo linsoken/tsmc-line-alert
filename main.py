@@ -2,19 +2,18 @@ import requests
 import os
 import json # ### [新增] 引入 json 庫，雖然 requests.post 時會自動處理，但保留習慣。
 
-# --- [新增] Cloudflare 相關環境變數 ---
+#--- [新增] Cloudflare 相關環境變數 ---
 CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID")
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID")
-# ----------------------------------------
-
+#----------------------------------------
 TSMC_TARGET_PRICE = 1500  #你要通知的價格
 # USER_ID = os.environ["LINE_USER_ID"] # ### [修改] 註銷，不再使用單一 USER_ID
 CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 
-# ------------------------------
+#------------------------------
 #  Yahoo Finance 先抓（快），如果被擋再用 FinMind 補
-# ------------------------------
+#------------------------------
 def get_price_from_yahoo():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW"
     headers = {
@@ -36,9 +35,9 @@ def get_price_from_yahoo():
         return None
 
 
-# ------------------------------
-#  Yahoo 失敗時，改用 FinMind
-# ------------------------------
+#------------------------------
+#Yahoo 失敗時，改用 FinMind
+#------------------------------
 def get_price_from_finmind():
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
@@ -58,9 +57,9 @@ def get_price_from_finmind():
         return None
 
 
-# ------------------------------
-#  自動選擇最穩定的價格來源
-# ------------------------------
+#------------------------------
+#自動選擇最穩定的價格來源
+#------------------------------
 def get_tsmc_price():
     print("🔍 嘗試從 Yahoo Finance 取得價格…")
     price = get_price_from_yahoo()
@@ -78,9 +77,9 @@ def get_tsmc_price():
     raise Exception("❌ Yahoo + FinMind 都無法取得股價")
 
 
-# ------------------------------
-# ### [新增] 取得所有 LINE 用戶 ID (透過 Cloudflare API)
-# ------------------------------
+#------------------------------
+#### [新增] 取得所有 LINE 用戶 ID (透過 Cloudflare API)
+#------------------------------
 def get_all_user_ids_from_cloudflare():
     if not all([CF_ACCOUNT_ID, CF_API_TOKEN, CF_KV_NAMESPACE_ID]):
         print("❌ 缺少 Cloudflare 認證資訊，無法取得用戶清單。")
@@ -124,9 +123,9 @@ def get_all_user_ids_from_cloudflare():
     return user_ids
 
 
-# ------------------------------
-# ### [修改] LINE 推播 (改用 Multicast API 支援群發)
-# ------------------------------
+#------------------------------
+#### [修改] LINE 推播 (改用 Multicast API 支援群發)
+#------------------------------
 # 函數名稱變更為更適合群發的名稱，並接受 user_ids 清單
 def send_line_message_to_all(user_ids, message):
     if not user_ids:
@@ -156,9 +155,9 @@ def send_line_message_to_all(user_ids, message):
             print(f"❌ LINE Multicast 失敗 (狀態碼: {r.status_code}, 回覆: {r.text})")
 
 
-# ------------------------------
-#  主程式 ### [修改] 整合 KV 讀取和群發推播邏輯
-# ------------------------------
+#------------------------------
+#主程式 ### [修改] 整合 KV 讀取和群發推播邏輯
+#------------------------------
 def main():
     price = get_tsmc_price()
     
