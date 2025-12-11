@@ -8,7 +8,7 @@ CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID")
 # ----------------------------------------
 
-TSMC_TARGET_PRICE = 1500  # 你要通知的價格
+TSMC_TARGET_PRICE = 1600  # 你要通知的價格
 # USER_ID = os.environ["LINE_USER_ID"] # 註銷，不再使用單一 USER_ID
 CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 
