@@ -9,22 +9,10 @@ CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID")
 CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 CWA_API_KEY = os.environ.get("CWA_API_KEY") 
 
-TSMC_TARGET_PRICE = 1600
-
-def get_tsmc_price():
-    try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        return r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-    except:
-        return None
-
 def get_weather_report():
     if not CWA_API_KEY: return "⚠️ 缺少 CWA_API_KEY"
-    # 061:台北市, 069:新北市, 001:宜蘭縣
     api_ids = ["F-D0047-061", "F-D0047-069", "F-D0047-001"]
     
-    # 顯示順序
     taipei_order = ["北投", "士林", "萬華", "信義", "松山", "中正", "大安", "大同", "中山", "內湖", "南港", "文山"]
     new_taipei_order = ["淡水", "板橋", "新店"]
     yilan_order = ["礁溪"]
@@ -37,17 +25,20 @@ def get_weather_report():
             r = requests.get(url, params={"Authorization": CWA_API_KEY}, timeout=15)
             data = r.json()
             
-            # 取得紀錄容器
             records = data.get("records", {})
             locs_container = records.get("Locations") or records.get("locations")
-            if not locs_container: continue
+            if not locs_container:
+                print(f"DEBUG: {api_id} 找不到 Locations 容器")
+                continue
             
             locations = locs_container[0].get("location") or locs_container[0].get("Location")
-            if not locations: continue
+            if not locations:
+                print(f"DEBUG: {api_id} 找不到 location 清單")
+                continue
 
             for loc in locations:
                 raw_name = loc.get("locationName", "")
-                # 清理名稱：例如「松山區」轉為「松山」
+                # 清除行政區後綴
                 clean_name = raw_name.replace("區", "").replace("鄉", "").replace("市", "").replace("鎮", "")
                 
                 elements = loc.get("weatherElement") or loc.get("WeatherElement")
@@ -55,41 +46,55 @@ def get_weather_report():
                 
                 t, wx, pop = "--", "--", "0"
                 for e in elements:
-                    # 模糊比對欄位名稱
-                    e_name = (e.get('elementName') or e.get('ElementName') or "").upper()
+                    # 診斷用：印出 API 到底給了什麼欄位名
+                    e_name = (e.get('elementName') or e.get('ElementName') or "")
+                    
                     times = e.get('time') or e.get('Time')
                     if not times: continue
                     
                     val_obj = times[0].get('elementValue') or times[0].get('ElementValue')
                     val = val_obj[0].get('value', '--') if val_obj else '--'
                     
-                    # 判斷邏輯：包含溫度關鍵字或 T，包含天氣關鍵字或 WX，包含降雨或 POP
-                    if "溫度" in e_name or e_name == "T": t = val
-                    elif "天氣現象" in e_name or e_name == "WX": wx = val
-                    elif "降雨機率" in e_name or "POP" in e_name: pop = val
+                    # 使用最寬鬆的關鍵字判定
+                    if any(k in e_name for k in ["T", "溫度", "Temperature"]): t = val
+                    elif any(k in e_name for k in ["Wx", "天氣現象", "Weather"]): wx = val
+                    elif any(k in e_name for k in ["PoP", "降雨", "Precipitation"]): pop = val
                 
                 weather_cache[clean_name] = f"{clean_name} {t}°{wx}({pop}%)"
-        except:
-            continue
+                
+        except Exception as e:
+            print(f"DEBUG: {api_id} 執行出錯: {e}")
 
-    if not weather_cache: return "❌ 氣象資料解析失敗"
+    # 診斷用：看快取裡到底存了什麼名稱
+    print(f"DEBUG: 目前抓取到的地區有: {list(weather_cache.keys())}")
+
+    if not weather_cache: return "❌ 氣象資料解析後完全為空"
 
     tw_time = datetime.utcnow() + timedelta(hours=8)
-    week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-    date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
+    date_str = tw_time.strftime("%m/%d (%A)") # 先用標準格式看時間
 
-    # 組合訊息格式
     final_msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
     
-    groups = [taipei_order, new_taipei_order, yilan_order]
-    for group in groups:
-        lines = [weather_cache[name] for name in group if name in weather_cache]
+    # 組合內容
+    content_found = False
+    for group in [taipei_order, new_taipei_order, yilan_order]:
+        lines = []
+        for name in group:
+            if name in weather_cache:
+                lines.append(weather_cache[name])
+                content_found = True
         if lines:
             final_msg += "\n".join(lines) + "\n\n"
 
-    final_msg += "天氣多變請多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
-    return final_msg.strip()
+    if not content_found:
+        final_msg += "(診斷報告：清單內地區與快取名稱不匹配)\n"
+        final_msg += f"預期地區: {taipei_order[:3]}...\n"
+        final_msg += f"實際地區: {list(weather_cache.keys())[:3]}...\n"
 
+    final_msg += "\n天氣多變請多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
+    return final_msg
+
+# --- 傳送邏輯維持不變 ---
 def get_all_user_ids_from_cloudflare():
     url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
@@ -109,21 +114,8 @@ def send_line_message_to_all(user_ids, message):
 def main():
     all_users = get_all_user_ids_from_cloudflare()
     if not all_users: return
-    tw_time = datetime.utcnow() + timedelta(hours=8)
-    tw_hour = tw_time.hour
-
-    if tw_hour == 7:
-        send_line_message_to_all(all_users, get_weather_report())
-    elif 13 <= tw_hour <= 15:
-        price = get_tsmc_price()
-        if price:
-            msg = f"📢 tsmc 今日最新價：{price} 元"
-            if price >= TSMC_TARGET_PRICE:
-                msg = f"📈 台積電股價已達 {price} 元！\n" + msg
-            send_line_message_to_all(all_users, msg)
-    else:
-        # 手動測試用邏輯
-        send_line_message_to_all(all_users, get_weather_report())
+    # 手動執行測試
+    send_line_message_to_all(all_users, get_weather_report())
 
 if __name__ == "__main__":
     main()
