@@ -1,6 +1,5 @@
 import requests
 import os
-import json
 from datetime import datetime, timedelta
 
 # --- 環境變數 ---
@@ -22,9 +21,10 @@ def get_tsmc_price():
 
 def get_weather_report():
     if not CWA_API_KEY: return "⚠️ 缺少 CWA_API_KEY"
+    # 061:台北市, 069:新北市, 001:宜蘭縣
     api_ids = ["F-D0047-061", "F-D0047-069", "F-D0047-001"]
     
-    # 定義顯示順序
+    # 顯示順序
     taipei_order = ["北投", "士林", "萬華", "信義", "松山", "中正", "大安", "大同", "中山", "內湖", "南港", "文山"]
     new_taipei_order = ["淡水", "板橋", "新店"]
     yilan_order = ["礁溪"]
@@ -37,7 +37,7 @@ def get_weather_report():
             r = requests.get(url, params={"Authorization": CWA_API_KEY}, timeout=15)
             data = r.json()
             
-            # 取得記錄容器
+            # 取得紀錄容器
             records = data.get("records", {})
             locs_container = records.get("Locations") or records.get("locations")
             if not locs_container: continue
@@ -46,8 +46,8 @@ def get_weather_report():
             if not locations: continue
 
             for loc in locations:
-                # 清理名稱：將「松山區」轉為「松山」
                 raw_name = loc.get("locationName", "")
+                # 清理名稱：例如「松山區」轉為「松山」
                 clean_name = raw_name.replace("區", "").replace("鄉", "").replace("市", "").replace("鎮", "")
                 
                 elements = loc.get("weatherElement") or loc.get("WeatherElement")
@@ -55,17 +55,18 @@ def get_weather_report():
                 
                 t, wx, pop = "--", "--", "0"
                 for e in elements:
-                    e_name = e.get('elementName') or e.get('ElementName')
+                    # 模糊比對欄位名稱
+                    e_name = (e.get('elementName') or e.get('ElementName') or "").upper()
                     times = e.get('time') or e.get('Time')
                     if not times: continue
                     
-                    # 取得第一個時段的值
                     val_obj = times[0].get('elementValue') or times[0].get('ElementValue')
                     val = val_obj[0].get('value', '--') if val_obj else '--'
                     
-                    if e_name in ['T', '溫度']: t = val
-                    elif e_name in ['Wx', '天氣現象']: wx = val
-                    elif e_name in ['PoP12h', '12小時降雨機率']: pop = val
+                    # 判斷邏輯：包含溫度關鍵字或 T，包含天氣關鍵字或 WX，包含降雨或 POP
+                    if "溫度" in e_name or e_name == "T": t = val
+                    elif "天氣現象" in e_name or e_name == "WX": wx = val
+                    elif "降雨機率" in e_name or "POP" in e_name: pop = val
                 
                 weather_cache[clean_name] = f"{clean_name} {t}°{wx}({pop}%)"
         except:
@@ -77,13 +78,14 @@ def get_weather_report():
     week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
 
-    # 組合訊息
+    # 組合訊息格式
     final_msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
     
-    for group in [taipei_order, new_taipei_order, yilan_order]:
-        group_lines = [weather_cache[name] for name in group if name in weather_cache]
-        if group_lines:
-            final_msg += "\n".join(group_lines) + "\n\n"
+    groups = [taipei_order, new_taipei_order, yilan_order]
+    for group in groups:
+        lines = [weather_cache[name] for name in group if name in weather_cache]
+        if lines:
+            final_msg += "\n".join(lines) + "\n\n"
 
     final_msg += "天氣多變請多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
     return final_msg.strip()
@@ -120,7 +122,7 @@ def main():
                 msg = f"📈 台積電股價已達 {price} 元！\n" + msg
             send_line_message_to_all(all_users, msg)
     else:
-        # 手動測試用 (非排程時間按 Run 就會發送)
+        # 手動測試用邏輯
         send_line_message_to_all(all_users, get_weather_report())
 
 if __name__ == "__main__":
