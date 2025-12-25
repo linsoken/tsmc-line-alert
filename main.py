@@ -11,12 +11,14 @@ CWA_API_KEY = os.environ.get("CWA_API_KEY")
 
 def get_weather_report():
     if not CWA_API_KEY: return "⚠️ 缺少 CWA_API_KEY"
-    # 指定 API ID：061(台北), 069(新北), 001(宜蘭)
+    # F-D0047-061: 台北市, 069: 新北市, 001: 宜蘭縣
     api_ids = ["F-D0047-061", "F-D0047-069", "F-D0047-001"]
     
+    # 想要抓取的清單
     taipei_order = ["北投", "士林", "萬華", "信義", "松山", "中正", "大安", "大同", "中山", "內湖", "南港", "文山"]
     new_taipei_order = ["淡水", "板橋", "新店"]
     yilan_order = ["礁溪"]
+    all_targets = taipei_order + new_taipei_order + yilan_order
     
     weather_cache = {}
 
@@ -26,67 +28,66 @@ def get_weather_report():
             r = requests.get(url, params={"Authorization": CWA_API_KEY}, timeout=15)
             data = r.json()
             
-            # 遍歷尋找 location 列表 (這段最保險，不管層級多深都找得到)
+            # 根據截圖精確定位：records -> Locations[0] -> location (List)
             records = data.get("records", {})
-            locations_list = []
-            if "Locations" in records and isinstance(records["Locations"], list):
-                locations_list = records["Locations"][0].get("location", [])
-            elif "locations" in records and isinstance(records["locations"], list):
-                locations_list = records["locations"][0].get("location", [])
+            locations_container = records.get("Locations") or records.get("locations") or []
+            if not locations_container: continue
+            
+            locations_list = locations_container[0].get("location") or []
             
             for loc in locations_list:
-                name = loc.get("locationName", "")
-                if not name: continue
+                api_loc_name = loc.get("locationName", "")
                 
-                # 清除名稱後綴
-                clean_name = name.replace("區", "").replace("鄉", "").replace("市", "").replace("鎮", "")
+                # 匹配邏輯：如果 API 回傳的「松山區」包含我們想要的「松山」
+                matched_target = None
+                for target in all_targets:
+                    if target in api_loc_name:
+                        matched_target = target
+                        break
+                
+                if not matched_target: continue
                 
                 elements = loc.get("weatherElement", [])
                 t, wx, pop = "--", "--", "0"
                 
                 for e in elements:
-                    ename = e.get("elementName", "")
-                    # 取得第一個時間點的預報
-                    times = e.get("time", [])
+                    ename = (e.get("elementName") or e.get("ElementName") or "")
+                    times = e.get("time") or e.get("Time") or []
                     if not times: continue
                     
-                    # 抓取數值
-                    vals = times[0].get("elementValue", [])
-                    if not vals: continue
-                    val = vals[0].get("value", "--")
+                    val_obj = times[0].get("elementValue") or times[0].get("ElementValue") or []
+                    val = val_obj[0].get("value", "--") if val_obj else "--"
                     
-                    if ename in ["T", "溫度"]: t = val
-                    elif ename in ["Wx", "天氣現象"]: wx = val
-                    elif ename in ["PoP12h", "降雨機率"]: pop = val
+                    # 依據關鍵字擷取內容
+                    if ename in ["T", "溫度", "Temperature"]: t = val
+                    elif ename in ["Wx", "天氣現象", "Weather"]: wx = val
+                    elif ename in ["PoP12h", "12小時降雨機率"]: pop = val
                 
-                weather_cache[clean_name] = f"{clean_name} {t}°{wx}({pop}%)"
-        except Exception as e:
-            print(f"DEBUG: {api_id} 出錯: {e}")
+                weather_cache[matched_target] = f"{matched_target} {t}°{wx}({pop}%)"
+        except:
+            continue
 
-    # --- 組合訊息文字 ---
+    # --- 組合訊息 ---
     tw_time = datetime.utcnow() + timedelta(hours=8)
-    week_map = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-    date_str = tw_time.strftime(f"%m/%d ({week_map[tw_time.weekday()]})")
+    week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
 
     final_msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
     
-    found_any = False
+    has_content = False
     for group in [taipei_order, new_taipei_order, yilan_order]:
-        group_lines = []
-        for n in group:
-            if n in weather_cache:
-                group_lines.append(weather_cache[n])
-                found_any = True
-        if group_lines:
-            final_msg += "\n".join(group_lines) + "\n\n"
+        lines = [weather_cache[n] for n in group if n in weather_cache]
+        if lines:
+            final_msg += "\n".join(lines) + "\n\n"
+            has_content = True
 
-    if not found_any:
-        return "❌ 抓不到指定地區的氣象，請檢查 API 授權或行政區名稱。"
+    if not has_content:
+        return "❌ 匹配失敗：API 有回傳資料但找不到指定的行政區，請確認地區名稱是否正確。"
 
     final_msg += "天氣多變請多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
     return final_msg.strip()
 
-# --- LINE & KV 邏輯 (不變) ---
+# --- 傳送邏輯 ---
 def get_all_user_ids_from_cloudflare():
     url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
