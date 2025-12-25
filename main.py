@@ -135,7 +135,7 @@ def main():
     if not all_users: return
 
     # 早上 7 點執行天氣任務 (每天)
-    if tw_hour == true:
+    if tw_hour == True:
         weather_msg = get_weather_report()
         send_line_message_to_all(all_users, weather_msg)
     
