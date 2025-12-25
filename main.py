@@ -23,9 +23,12 @@ def get_tsmc_price():
 def get_weather_report():
     if not CWA_API_KEY: return "⚠️ 缺少 CWA_API_KEY"
     api_ids = ["F-D0047-061", "F-D0047-069", "F-D0047-001"]
-    taipei_list = ["北投", "士林", "萬華", "信義", "松山", "中正", "大安", "大同", "中山", "內湖", "南港", "文山"]
-    new_taipei_list = ["淡水", "板橋", "新店"]
-    yilan_list = ["礁溪"]
+    
+    # 定義我們想要顯示的順序
+    taipei_order = ["北投", "士林", "萬華", "信義", "松山", "中正", "大安", "大同", "中山", "內湖", "南港", "文山"]
+    new_taipei_order = ["淡水", "板橋", "新店"]
+    yilan_order = ["礁溪"]
+    
     weather_cache = {}
 
     for api_id in api_ids:
@@ -33,29 +36,42 @@ def get_weather_report():
             url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{api_id}"
             r = requests.get(url, params={"Authorization": CWA_API_KEY}, timeout=15)
             data = r.json()
-            # 取得位置清單
-            locations = data['records']['Locations'][0]['location']
+            
+            # 取得 records 底下的 Locations (注意大寫)
+            records = data.get("records", {})
+            locs_container = records.get("Locations") or records.get("locations")
+            if not locs_container: continue
+            
+            locations = locs_container[0].get("location") or locs_container[0].get("Location")
+            if not locations: continue
 
             for loc in locations:
-                name = loc['locationName'].replace("區", "").replace("鄉", "").replace("市", "")
-                elements = loc['weatherElement']
+                # 取得原始名稱 (例如: 松山區)
+                raw_name = loc.get("locationName", "")
                 
-                # 直接根據位置抓取：通常 0 是溫度, 1 是降雨機率, 6 是天氣現象 (視 API ID 而定)
-                # 為了保險，我們改用循環檢查
+                elements = loc.get("weatherElement") or loc.get("WeatherElement")
+                if not elements: continue
+                
                 t, wx, pop = "--", "--", "0"
                 for e in elements:
                     e_name = e.get('elementName') or e.get('ElementName')
-                    val = e['time'][0]['elementValue'][0]['value']
+                    times = e.get('time') or e.get('Time')
+                    if not times: continue
+                    
+                    val_obj = times[0].get('elementValue') or times[0].get('ElementValue')
+                    val = val_obj[0].get('value', '--') if val_obj else '--'
                     
                     if e_name in ['T', '溫度']: t = val
                     elif e_name in ['Wx', '天氣現象']: wx = val
                     elif e_name in ['PoP12h', '12小時降雨機率']: pop = val
                 
-                weather_cache[name] = f"{name} {t}°{wx}({pop}%)"
+                # 存入快取，鍵值去掉區/鄉/市/鎮
+                clean_name = raw_name.replace("區", "").replace("鄉", "").replace("市", "").replace("鎮", "")
+                weather_cache[clean_name] = f"{clean_name} {t}°{wx}({pop}%)"
         except:
             continue
 
-    if not weather_cache: return "❌ 氣象資料內容為空"
+    if not weather_cache: return "❌ 氣象資料解析失敗"
 
     tw_time = datetime.utcnow() + timedelta(hours=8)
     week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -63,12 +79,14 @@ def get_weather_report():
 
     final_msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
     
-    # 組合各地區內容
-    groups = [taipei_list, new_taipei_list, yilan_list]
-    for group in groups:
-        lines = [weather_cache[n] for n in group if n in weather_cache]
-        if lines:
-            final_msg += "\n".join(lines) + "\n\n"
+    # 按照指定順序組合訊息
+    for group in [taipei_order, new_taipei_order, yilan_order]:
+        group_lines = []
+        for name in group:
+            if name in weather_cache:
+                group_lines.append(weather_cache[name])
+        if group_lines:
+            final_msg += "\n".join(group_lines) + "\n\n"
 
     final_msg += "天氣多變請多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
     return final_msg.strip()
@@ -79,8 +97,7 @@ def get_all_user_ids_from_cloudflare():
     try:
         r = requests.get(url, headers=headers, timeout=10)
         return [item['name'] for item in r.json().get('result', [])]
-    except:
-        return []
+    except: return []
 
 def send_line_message_to_all(user_ids, message):
     if not user_ids or not message: return
@@ -96,7 +113,6 @@ def main():
     tw_time = datetime.utcnow() + timedelta(hours=8)
     tw_hour = tw_time.hour
 
-    # 定時邏輯
     if tw_hour == 7:
         send_line_message_to_all(all_users, get_weather_report())
     elif 13 <= tw_hour <= 15:
@@ -106,7 +122,7 @@ def main():
                 send_line_message_to_all(all_users, f"📈 台積電股價已達 {price} 元！")
             send_line_message_to_all(all_users, f"📢 tsmc 今日最新價：{price} 元")
     else:
-        # 手動測試
+        # 手動測試用
         send_line_message_to_all(all_users, get_weather_report())
 
 if __name__ == "__main__":
