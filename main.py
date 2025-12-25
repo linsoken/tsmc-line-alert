@@ -24,7 +24,7 @@ def get_weather_report():
     if not CWA_API_KEY: return "⚠️ 缺少 CWA_API_KEY"
     api_ids = ["F-D0047-061", "F-D0047-069", "F-D0047-001"]
     
-    # 定義我們想要顯示的順序
+    # 定義顯示順序
     taipei_order = ["北投", "士林", "萬華", "信義", "松山", "中正", "大安", "大同", "中山", "內湖", "南港", "文山"]
     new_taipei_order = ["淡水", "板橋", "新店"]
     yilan_order = ["礁溪"]
@@ -37,7 +37,7 @@ def get_weather_report():
             r = requests.get(url, params={"Authorization": CWA_API_KEY}, timeout=15)
             data = r.json()
             
-            # 取得 records 底下的 Locations (注意大寫)
+            # 取得記錄容器
             records = data.get("records", {})
             locs_container = records.get("Locations") or records.get("locations")
             if not locs_container: continue
@@ -46,8 +46,9 @@ def get_weather_report():
             if not locations: continue
 
             for loc in locations:
-                # 取得原始名稱 (例如: 松山區)
+                # 清理名稱：將「松山區」轉為「松山」
                 raw_name = loc.get("locationName", "")
+                clean_name = raw_name.replace("區", "").replace("鄉", "").replace("市", "").replace("鎮", "")
                 
                 elements = loc.get("weatherElement") or loc.get("WeatherElement")
                 if not elements: continue
@@ -58,6 +59,7 @@ def get_weather_report():
                     times = e.get('time') or e.get('Time')
                     if not times: continue
                     
+                    # 取得第一個時段的值
                     val_obj = times[0].get('elementValue') or times[0].get('ElementValue')
                     val = val_obj[0].get('value', '--') if val_obj else '--'
                     
@@ -65,8 +67,6 @@ def get_weather_report():
                     elif e_name in ['Wx', '天氣現象']: wx = val
                     elif e_name in ['PoP12h', '12小時降雨機率']: pop = val
                 
-                # 存入快取，鍵值去掉區/鄉/市/鎮
-                clean_name = raw_name.replace("區", "").replace("鄉", "").replace("市", "").replace("鎮", "")
                 weather_cache[clean_name] = f"{clean_name} {t}°{wx}({pop}%)"
         except:
             continue
@@ -77,14 +77,11 @@ def get_weather_report():
     week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
 
+    # 組合訊息
     final_msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
     
-    # 按照指定順序組合訊息
     for group in [taipei_order, new_taipei_order, yilan_order]:
-        group_lines = []
-        for name in group:
-            if name in weather_cache:
-                group_lines.append(weather_cache[name])
+        group_lines = [weather_cache[name] for name in group if name in weather_cache]
         if group_lines:
             final_msg += "\n".join(group_lines) + "\n\n"
 
@@ -118,11 +115,12 @@ def main():
     elif 13 <= tw_hour <= 15:
         price = get_tsmc_price()
         if price:
+            msg = f"📢 tsmc 今日最新價：{price} 元"
             if price >= TSMC_TARGET_PRICE:
-                send_line_message_to_all(all_users, f"📈 台積電股價已達 {price} 元！")
-            send_line_message_to_all(all_users, f"📢 tsmc 今日最新價：{price} 元")
+                msg = f"📈 台積電股價已達 {price} 元！\n" + msg
+            send_line_message_to_all(all_users, msg)
     else:
-        # 手動測試用
+        # 手動測試用 (非排程時間按 Run 就會發送)
         send_line_message_to_all(all_users, get_weather_report())
 
 if __name__ == "__main__":
