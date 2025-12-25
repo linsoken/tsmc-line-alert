@@ -13,7 +13,7 @@ def get_weather_report():
     if not CWA_API_KEY: return "⚠️ 缺少 CWA_API_KEY"
     api_ids = ["F-D0047-061", "F-D0047-069", "F-D0047-001"]
     
-    # 標準化名稱清單
+    # 標準化顯示順序
     taipei_order = ["北投", "士林", "萬華", "信義", "松山", "中正", "大安", "大同", "中山", "內湖", "南港", "文山"]
     new_taipei_order = ["淡水", "板橋", "新店"]
     yilan_order = ["礁溪"]
@@ -27,43 +27,50 @@ def get_weather_report():
             r = requests.get(url, params={"Authorization": CWA_API_KEY}, timeout=15)
             data = r.json()
             
-            # 第一層檢查：records
+            # 根據截圖精確定位：records -> Locations[0] -> Location (大寫 L)
             records = data.get("records", {})
-            # 第二層檢查：Locations 或 locations (複數)
-            locs_group = records.get("Locations") or records.get("locations")
-            if not locs_group or not isinstance(locs_group, list): continue
+            locations_outer = records.get("Locations") or records.get("locations")
+            if not locations_outer: continue
             
-            # 第三層檢查：內部 location 或 Location (單數)
-            location_list = locs_group[0].get("location") or locs_group[0].get("Location")
+            # 關鍵點：截圖顯示內部行政區清單的 Key 是 "Location" (單數/大寫)
+            location_list = locations_outer[0].get("Location") or locations_outer[0].get("location")
             if not location_list: continue
 
             for loc in location_list:
-                api_name = loc.get("locationName", "").strip()
+                api_name = loc.get("locationName", "")
                 
-                # 模糊匹配：API 的「松山區」包含我們的「松山」就過關
-                matched_key = next((t for t in all_targets if t in api_name), None)
+                # 模糊比對地區
+                matched_key = None
+                for t in all_targets:
+                    if t in api_name:
+                        matched_key = t
+                        break
+                
                 if not matched_key: continue
                 
-                # 取得氣象元素列表
-                elements = loc.get("weatherElement") or loc.get("WeatherElement") or []
+                # 擷取氣象元素：截圖顯示是 "WeatherElement" (大寫 W)
+                elements = loc.get("WeatherElement") or loc.get("weatherElement") or []
                 t, wx, pop = "--", "--", "0"
                 
                 for e in elements:
-                    ename = (e.get("elementName") or e.get("ElementName") or "")
-                    times = e.get("time") or e.get("Time") or []
+                    ename = e.get("ElementName") or e.get("elementName") or ""
+                    times = e.get("Time") or e.get("time") or []
                     if not times: continue
                     
-                    # 取得第一個時段的值
-                    val_list = times[0].get("elementValue") or times[0].get("ElementValue") or []
-                    val = val_list[0].get("value", "--") if val_list else "--"
+                    # 擷取數值：截圖顯示是 "ElementValue" (大寫 E)
+                    val_list = times[0].get("ElementValue") or times[0].get("elementValue") or []
+                    if not val_list: continue
                     
-                    # 匹配欄位
+                    # 針對溫度 (T) 和 降雨機率 (PoP12h) 取值
+                    val = val_list[0].get("value") or val_list[0].get("Temperature") or "--"
+                    
                     if ename in ["T", "溫度"]: t = val
                     elif ename in ["Wx", "天氣現象"]: wx = val
-                    elif ename in ["PoP12h", "降雨機率", "12小時降雨機率"]: pop = val
+                    elif ename in ["PoP12h", "12小時降雨機率"]: pop = val
                 
                 weather_cache[matched_key] = f"{matched_key} {t}°{wx}({pop}%)"
-        except:
+        except Exception as e:
+            print(f"DEBUG Error for {api_id}: {e}")
             continue
 
     # --- 組合訊息文字 ---
@@ -73,15 +80,15 @@ def get_weather_report():
 
     final_msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
     
-    has_data = False
+    found_any = False
     for group in [taipei_order, new_taipei_order, yilan_order]:
-        lines = [weather_cache[n] for n in group if n in weather_cache]
-        if lines:
-            final_msg += "\n".join(lines) + "\n\n"
-            has_data = True
+        group_lines = [weather_cache[n] for n in group if n in weather_cache]
+        if group_lines:
+            final_msg += "\n".join(group_lines) + "\n\n"
+            found_any = True
 
-    if not has_data:
-        return "❌ 結構比對失敗：API 資料存在但路徑抓取錯誤，請檢查 JSON 結構層級。"
+    if not found_any:
+        return "❌ 深度解析失敗：請檢查 GitHub Actions 的 Log，欄位名稱可能不符合預期。"
 
     final_msg += "天氣多變請多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
     return final_msg.strip()
