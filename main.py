@@ -41,47 +41,64 @@ def get_tsmc_price():
     raise Exception("❌ 無法取得股價")
 
 # ------------------------------
-# 台北各區 + 礁溪天氣函式
+# [修改] 天氣函式：嚴格執行分組與斷行
 # ------------------------------
 def get_weather_report():
     if not CWA_API_KEY: return "⚠️ 缺少 CWA_API_KEY"
     
-    targets = [{"id": "F-D0047-061", "name": "台北市"}, {"id": "F-D0047-001", "name": "宜蘭縣"}]
-    results = []
+    # 061:台北市, 069:新北市, 001:宜蘭縣
+    api_ids = ["F-D0047-061", "F-D0047-069", "F-D0047-001"]
     
+    # 定義顯示順序
+    taipei_list = ["北投", "士林", "萬華", "信義", "松山", "中正", "大安", "大同", "中山", "內湖", "南港", "文山"]
+    new_taipei_list = ["淡水", "板橋", "新店"]
+    yilan_list = ["礁溪"]
+    
+    weather_cache = {}
+
     try:
-        for target in targets:
-            url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{target['id']}"
+        for api_id in api_ids:
+            url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{api_id}"
             r = requests.get(url, params={"Authorization": CWA_API_KEY})
             locations = r.json()["records"]["locations"][0]["location"]
             
             for loc in locations:
-                name = loc["locationName"]
-                if target["id"] == "F-D0047-001" and name != "礁溪鄉":
-                    continue
-                
-                # 取得天氣元素 (溫度、天氣現象、降雨機率)
+                name = loc["locationName"].replace("區", "").replace("鄉", "").replace("市", "")
                 elements = {e['elementName']: e['time'][0]['elementValue'][0]['value'] for e in loc['weatherElement']}
                 t = elements.get('T', '--')
                 wx = elements.get('Wx', '--')
                 pop = elements.get('PoP12h', '0')
-                
-                short_name = name.replace("區", "").replace("鄉", "")
-                results.append(f"{short_name}{t}°{wx}(☔{pop}%)")
+                weather_cache[name] = f"{name} {t}°{wx}(☔{pop}%)"
 
-        # --- 處理中文星期格式 ---
+        # --- 開始組合訊息，使用 \n\n 強制斷出空行 ---
         tw_time = datetime.utcnow() + timedelta(hours=8)
         week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-        week_str = week_list[tw_time.weekday()] # 0是週一, 6是週日
-        date_str = tw_time.strftime(f"%m/%d ({week_str})")
+        date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
 
-        return f"🌤 一分鐘報天氣 🌤 {date_str}\n" + "，".join(results) + \
-               "\n\n天氣多變請多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
+        # 標題
+        final_msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
+
+        # 1. 台北市部分
+        final_msg += "\n".join([weather_cache[n] for n in taipei_list if n in weather_cache])
+        final_msg += "\n\n" # 強制空一行
+
+        # 2. 新北市部分
+        final_msg += "\n".join([weather_cache[n] for n in new_taipei_list if n in weather_cache])
+        final_msg += "\n\n" # 強制空一行
+
+        # 3. 宜蘭部分
+        final_msg += "\n".join([weather_cache[n] for n in yilan_list if n in weather_cache])
+
+        # 結尾
+        final_msg += "\n\n天氣多變請多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
+        
+        return final_msg
+        
     except Exception as e:
         return f"❌ 天氣抓取失敗: {e}"
 
 # ------------------------------
-# 原有的 Cloudflare & LINE 函式 (保留)
+# 原有的 Cloudflare & LINE 函式 (完全保留)
 # ------------------------------
 def get_all_user_ids_from_cloudflare():
     if not all([CF_ACCOUNT_ID, CF_API_TOKEN, CF_KV_NAMESPACE_ID]): return []
