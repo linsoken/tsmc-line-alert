@@ -1,14 +1,16 @@
-name: TSMC Price Alert
+name: TSMC Price & Weather Alert
 
 on:
   schedule:
-    - cron: "0 6 * * 1-5"    # 每小時整點（週一〜週五）
-  workflow_dispatch:         # 手動觸發
+    # 台灣 07:00 (每天執行，包含週末)
+    - cron: "0 23 * * *"
+    # 台灣 14:00 (週一至週五)
+    - cron: "0 6 * * 1-5"
+  workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout repo
       uses: actions/checkout@v3
@@ -23,11 +25,9 @@ jobs:
 
     - name: Run script
       env:
-        # 您的 LINE 變數
-        LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-        # [新增] Cloudflare 認證變數
         CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         CF_KV_NAMESPACE_ID: ${{ secrets.CF_KV_NAMESPACE_ID }}
+        CWA_API_KEY: ${{ secrets.CWA_API_KEY }}
       run: python main.py
