@@ -31,10 +31,7 @@ def get_tsmc_price():
 def get_weather_report():
     if not CWA_API_KEY: return "⚠️ 缺少 CWA_API_KEY"
     
-    # 061:台北市, 069:新北市, 001:宜蘭縣
     api_ids = ["F-D0047-061", "F-D0047-069", "F-D0047-001"]
-    
-    # 地區顯示順序
     taipei_list = ["北投", "士林", "萬華", "信義", "松山", "中正", "大安", "大同", "中山", "內湖", "南港", "文山"]
     new_taipei_list = ["淡水", "板橋", "新店"]
     yilan_list = ["礁溪"]
@@ -48,7 +45,6 @@ def get_weather_report():
             data = r.json()
             
             records = data.get("records", {})
-            # 相容氣象署 API 的大小寫差異
             locations_data = records.get("Locations") or records.get("locations")
             
             if not locations_data or not locations_data[0].get("location"):
@@ -58,13 +54,10 @@ def get_weather_report():
             
             for loc in locations:
                 name = loc["locationName"].replace("區", "").replace("鄉", "").replace("市", "")
-                
-                # 提取天氣元素：溫度(T)、天氣現象(Wx)、12小時降雨機率(PoP12h)
                 elements = {e['elementName']: e['time'][0]['elementValue'][0]['value'] for e in loc['weatherElement']}
                 t = elements.get('T') or elements.get('Temperature', '--')
                 wx = elements.get('Wx') or elements.get('Weather', '--')
                 pop = elements.get('PoP12h') or elements.get('ProbabilityOfPrecipitation', '0')
-                
                 weather_cache[name] = f"{name} {t}°{wx}({pop}%)"
         except:
             continue
@@ -72,22 +65,18 @@ def get_weather_report():
     if not weather_cache:
         return "❌ 氣象資料解析失敗，請確認氣象局伺服器狀態。"
 
-    # --- 組合訊息文字 ---
     tw_time = datetime.utcnow() + timedelta(hours=8)
     week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
 
     final_msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
     
-    # 分組邏輯：台北市
     t_nodes = [weather_cache[n] for n in taipei_list if n in weather_cache]
     if t_nodes: final_msg += "\n".join(t_nodes) + "\n\n"
     
-    # 分組邏輯：新北市
     n_nodes = [weather_cache[n] for n in new_taipei_list if n in weather_cache]
     if n_nodes: final_msg += "\n".join(n_nodes) + "\n\n"
     
-    # 分組邏輯：礁溪
     y_nodes = [weather_cache[n] for n in yilan_list if n in weather_cache]
     if y_nodes: final_msg += "\n".join(y_nodes)
 
@@ -126,15 +115,15 @@ def main():
     tw_time = datetime.utcnow() + timedelta(hours=8)
     tw_hour = tw_time.hour
 
-    # 早上 7 點推送天氣
     if tw_hour == True:
         report = get_weather_report()
         send_line_message_to_all(all_users, report)
-    
-    # 下午 2 點推送股價 (收盤前後)
     elif 13 <= tw_hour <= 15:
         price = get_tsmc_price()
         if price:
             if price >= TSMC_TARGET_PRICE:
                 send_line_message_to_all(all_users, f"📈 台積電股價已達 {price} 元！\n（提醒門檻：{TSMC_TARGET_PRICE}）")
-            send_line_message_to_all(
+            send_line_message_to_all(all_users, f"📢 tsmc 今日最新價：{price} 元")
+
+if __name__ == "__main__":
+    main()
