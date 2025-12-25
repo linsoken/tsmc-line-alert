@@ -34,17 +34,34 @@ def get_weather_report():
             r = requests.get(url, params={"Authorization": CWA_API_KEY}, timeout=15)
             data = r.json()
             records = data.get("records", {})
-            locations_data = records.get("Locations") or records.get("locations")
-            if not locations_data: continue
-            locations = locations_data[0]["location"]
+            
+            # 修正 1：相容 Locations 或 locations
+            locs_container = records.get("Locations") or records.get("locations")
+            if not locs_container: continue
+            
+            # 修正 2：相容 location 欄位
+            locations = locs_container[0].get("location") or locs_container[0].get("Location")
+            if not locations: continue
+
             for loc in locations:
-                name = loc["locationName"].replace("區", "").replace("鄉", "").replace("市", "")
-                elements = {e['elementName']: e['time'][0]['elementValue'][0]['value'] for e in loc['weatherElement']}
+                name = loc.get("locationName", "").replace("區", "").replace("鄉", "").replace("市", "")
+                
+                # 修正 3：相容 weatherElement 大小寫
+                w_elements = loc.get("weatherElement") or loc.get("WeatherElement")
+                if not w_elements: continue
+                
+                # 修正 4：相容 elementName 大小寫
+                elements = {
+                    (e.get('elementName') or e.get('ElementName')): e['time'][0]['elementValue'][0]['value'] 
+                    for e in w_elements
+                }
+                
                 t = elements.get('T') or elements.get('Temperature', '--')
                 wx = elements.get('Wx') or elements.get('Weather', '--')
                 pop = elements.get('PoP12h') or elements.get('ProbabilityOfPrecipitation', '0')
                 weather_cache[name] = f"{name} {t}°{wx}({pop}%)"
-        except:
+        except Exception as e:
+            print(f"DEBUG: 解析 {api_id} 失敗: {e}")
             continue
 
     if not weather_cache: return "❌ 氣象資料解析失敗"
@@ -81,11 +98,9 @@ def send_line_message_to_all(user_ids, message):
 def main():
     all_users = get_all_user_ids_from_cloudflare()
     if not all_users: return
-
     tw_time = datetime.utcnow() + timedelta(hours=8)
     tw_hour = tw_time.hour
 
-    # --- 執行排程 ---
     if tw_hour == 7:
         send_line_message_to_all(all_users, get_weather_report())
     elif 13 <= tw_hour <= 15:
@@ -94,11 +109,8 @@ def main():
             if price >= TSMC_TARGET_PRICE:
                 send_line_message_to_all(all_users, f"📈 台積電股價已達 {price} 元！")
             send_line_message_to_all(all_users, f"📢 tsmc 今日最新價：{price} 元")
-    
-    # --- [重要] 測試發送：如果您現在手動 Run Workflow，這段會讓您立刻收到推播 ---
     else:
-        # 測試完畢後，您可以不用改這段，它平常不會影響 7 點和 14 點的自動排程
-        # 只有當您在「非排程時間」手動按 GitHub 執行時才會觸發一次
+        # 手動測試用
         send_line_message_to_all(all_users, get_weather_report())
 
 if __name__ == "__main__":
