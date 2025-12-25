@@ -20,22 +20,33 @@ def get_tsmc_price():
         return None
 
 def get_loc_weather(api_id, loc_name):
+    """萬用路徑抓取：自動匹配大小寫與不同層級"""
     try:
         url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{api_id}"
-        # 加上時間過濾，確保抓到的是最新的資料
         params = {"Authorization": CWA_API_KEY, "locationName": loc_name}
         r = requests.get(url, params=params, timeout=10)
         data = r.json()
         
-        loc_data = data['records']['locations'][0]['location'][0]
-        elements = loc_data['weatherElement']
+        # 逐層向下挖掘，相容大小寫
+        records = data.get("records", {})
+        locations_container = records.get("locations") or records.get("Locations")
+        if not locations_container: return None
+        
+        location_list = locations_container[0].get("location") or locations_container[0].get("Location")
+        if not location_list: return None
+        
+        target_loc = location_list[0]
+        elements = target_loc.get("weatherElement") or target_loc.get("WeatherElement")
         
         wx, pop, t, min_t, max_t = "--", "0", "--", "--", "--"
         
         for e in elements:
-            e_name = e.get('elementName')
-            # 取得最新的時段數值
-            val = e['time'][0]['elementValue'][0]['value']
+            e_name = e.get("elementName") or e.get("ElementName")
+            time_list = e.get("time") or e.get("Time")
+            if not time_list: continue
+            
+            val_list = time_list[0].get("elementValue") or time_list[0].get("ElementValue")
+            val = val_list[0].get("value") if val_list else "--"
             
             if e_name == "Wx": wx = val
             elif e_name == "PoP12h": pop = val
@@ -43,18 +54,20 @@ def get_loc_weather(api_id, loc_name):
             elif e_name == "MinT": min_t = val
             elif e_name == "MaxT": max_t = val
         
-        # 修正邏輯：如果沒有 MinT/MaxT，就用 T 代替
+        # 數值修正邏輯
         lo = min_t if min_t != "--" else t
         hi = max_t if max_t != "--" else t
         
         display_name = loc_name.replace("區", "").replace("鎮", "").replace("鄉", "")
         return f"📍 {display_name} {lo}~{hi}° {wx} (降雨{pop}%)"
     except Exception as e:
+        print(f"DEBUG: {loc_name} 解析失敗: {e}")
         return None
 
 def get_weather_report():
     if not CWA_API_KEY: return "⚠️ 缺少 API KEY"
     
+    # 按照您的要求排序
     sections = [
         ("F-D0047-061", ["北投區", "士林區", "萬華區", "信義區", "松山區", "中正區", "大安區", "大同區", "中山區", "內湖區", "南港區", "文山區"]),
         ("F-D0047-069", ["淡水區"]),
@@ -65,23 +78,25 @@ def get_weather_report():
     week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
 
-    results = []
+    all_lines = []
     for api_id, locs in sections:
-        group = []
+        group_lines = []
         for l in locs:
             info = get_loc_weather(api_id, l)
-            if info: group.append(info)
-        if group: results.append("\n".join(group))
+            if info: group_lines.append(info)
+        if group_lines:
+            all_lines.append("\n".join(group_lines))
 
-    if not results: return "❌ 無法取得氣象細節，請檢查 API 額度或連線。"
+    if not all_lines:
+        return "❌ 深度解析失敗，請確認氣象局 API 權限或行政區名稱。"
 
     final_msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
-    final_msg += "\n\n".join(results)
-    final_msg += "\n\n天氣多變請多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
+    final_msg += "\n\n".join(all_lines)
+    final_msg += "\n\n天氣變化多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
     return final_msg
 
 def main():
-    # 取得 KV 中的用戶
+    # 讀取用戶清單
     kv_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
     try:
@@ -92,18 +107,14 @@ def main():
     tw_time = datetime.utcnow() + timedelta(hours=8)
     tw_hour = tw_time.hour
 
-    msg = None
-    # 早上 7 點發天氣
+    # 邏輯分流：早上報天氣，下午報股票，其餘手動執行報天氣
     if tw_hour == 7:
         msg = get_weather_report()
-    # 下午 1-3 點發台積電
     elif 13 <= tw_hour <= 15:
         p = get_tsmc_price()
-        if p:
-            msg = f"📢 tsmc 今日最新價：{p} 元"
-            if p >= TSMC_TARGET_PRICE:
-                msg = f"📈 台積電達標！\n{msg}"
-    # 其他時間手動執行發天氣測試
+        msg = f"📢 tsmc 今日最新價：{p} 元" if p else None
+        if p and p >= TSMC_TARGET_PRICE:
+            msg = f"📈 台積電達標！\n{msg}"
     else:
         msg = get_weather_report()
 
