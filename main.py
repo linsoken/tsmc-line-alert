@@ -1,184 +1,134 @@
 import requests
 import os
 import json
+from datetime import datetime, timedelta
 
-# --- [新增] Cloudflare 相關環境變數 ---
+# --- 環境變數 ---
 CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID")
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID")
-# ----------------------------------------
-
-TSMC_TARGET_PRICE = 1600  # 你要通知的價格
-# USER_ID = os.environ["LINE_USER_ID"] # 註銷，不再使用單一 USER_ID
 CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+CWA_API_KEY = os.environ.get("CWA_API_KEY") 
+
+TSMC_TARGET_PRICE = 1600
 
 # ------------------------------
-#  Yahoo Finance 先抓（快），如果被擋再用 FinMind 補
+# 原有的股價抓取函式 (保留)
 # ------------------------------
 def get_price_from_yahoo():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW"
-    headers = {
-        "User-Agent": "Mozilla/5.0"  # GitHub Actions 需要 User-Agent
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, headers=headers)
-
-    if r.status_code != 200:
-        print(f"⚠ Yahoo API 回傳狀態碼：{r.status_code}")
-        return None
-
+    if r.status_code != 200: return None
     try:
-        data = r.json()  # 若回傳 HTML 會直接失敗
-        price = data["chart"]["result"][0]["meta"]["regularMarketPrice"]
-        return price
-    except Exception:
-        print("⚠ Yahoo 回傳不是 JSON，可能被擋。前 200 字：")
-        print(r.text[:200])
-        return None
+        data = r.json()
+        return data["chart"]["result"][0]["meta"]["regularMarketPrice"]
+    except: return None
 
-
-# ------------------------------
-#  Yahoo 失敗時，改用 FinMind
-# ------------------------------
 def get_price_from_finmind():
     url = "https://api.finmindtrade.com/api/v4/data"
-    params = {
-        "dataset": "TaiwanStockPrice",
-        "data_id": "2330",
-        "start_date": "2024-01-01"
-    }
-
+    params = {"dataset": "TaiwanStockPrice", "data_id": "2330", "start_date": "2024-01-01"}
     try:
         r = requests.get(url, params=params)
-        data = r.json()
-        price = data["data"][-1]["close"]
-        print(f"🟢 使用 FinMind 抓到價格：{price}")
-        return price
-    except Exception as e:
-        print("❌ FinMind 抓取失敗：", e)
-        return None
+        return r.json()["data"][-1]["close"]
+    except: return None
 
-
-# ------------------------------
-#  自動選擇最穩定的價格來源
-# ------------------------------
 def get_tsmc_price():
-    print("🔍 嘗試從 Yahoo Finance 取得價格…")
     price = get_price_from_yahoo()
-
-    if price is not None:
-        print(f"🟢 使用 Yahoo Finance 抓到價格：{price}")
-        return price
-
-    print("⚠ Yahoo 失敗，改用 FinMind API…")
+    if price is not None: return price
     price = get_price_from_finmind()
-
-    if price is not None:
-        return price
-
-    raise Exception("❌ Yahoo + FinMind 都無法取得股價")
-
+    if price is not None: return price
+    raise Exception("❌ 無法取得股價")
 
 # ------------------------------
-# ### [新增] 取得所有 LINE 用戶 ID (透過 Cloudflare API)
+# 台北各區 + 礁溪天氣函式
+# ------------------------------
+def get_weather_report():
+    if not CWA_API_KEY: return "⚠️ 缺少 CWA_API_KEY"
+    
+    targets = [{"id": "F-D0047-061", "name": "台北市"}, {"id": "F-D0047-001", "name": "宜蘭縣"}]
+    results = []
+    
+    try:
+        for target in targets:
+            url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{target['id']}"
+            r = requests.get(url, params={"Authorization": CWA_API_KEY})
+            locations = r.json()["records"]["locations"][0]["location"]
+            
+            for loc in locations:
+                name = loc["locationName"]
+                if target["id"] == "F-D0047-001" and name != "礁溪鄉":
+                    continue
+                
+                # 取得天氣元素 (溫度、天氣現象、降雨機率)
+                elements = {e['elementName']: e['time'][0]['elementValue'][0]['value'] for e in loc['weatherElement']}
+                t = elements.get('T', '--')
+                wx = elements.get('Wx', '--')
+                pop = elements.get('PoP12h', '0')
+                
+                short_name = name.replace("區", "").replace("鄉", "")
+                results.append(f"{short_name}{t}°{wx}(☔{pop}%)")
+
+        # --- 處理中文星期格式 ---
+        tw_time = datetime.utcnow() + timedelta(hours=8)
+        week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        week_str = week_list[tw_time.weekday()] # 0是週一, 6是週日
+        date_str = tw_time.strftime(f"%m/%d ({week_str})")
+
+        return f"🌤 一分鐘報天氣 🌤 {date_str}\n" + "，".join(results) + \
+               "\n\n天氣多變請多加保重，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
+    except Exception as e:
+        return f"❌ 天氣抓取失敗: {e}"
+
+# ------------------------------
+# 原有的 Cloudflare & LINE 函式 (保留)
 # ------------------------------
 def get_all_user_ids_from_cloudflare():
-    if not all([CF_ACCOUNT_ID, CF_API_TOKEN, CF_KV_NAMESPACE_ID]):
-        print("❌ 缺少 Cloudflare 認證資訊，無法取得用戶清單。")
-        return []
-
+    if not all([CF_ACCOUNT_ID, CF_API_TOKEN, CF_KV_NAMESPACE_ID]): return []
     url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
-    headers = {
-        "Authorization": f"Bearer {CF_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
+    headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
     user_ids = []
     cursor = None
-
-    # 處理 KV API 的分頁
     while True:
         params = {'limit': 1000}
-        if cursor:
-            params['cursor'] = cursor
-
-        try:
-            r = requests.get(url, headers=headers, params=params)
-            r.raise_for_status()
-            data = r.json()
-
-            if not data.get('success'):
-                print(f"❌ Cloudflare API 錯誤: {data.get('errors')}")
-                return []
-
-            user_ids.extend([item['name'] for item in data['result']])
-
-            cursor = data['result_info'].get('cursor')
-            if not cursor:
-                break
-
-        except requests.exceptions.RequestException as e:
-            print(f"❌ 取得 Cloudflare KV 失敗: {e}")
-            return []
-
-    print(f"✅ 成功從 Cloudflare 取得 {len(user_ids)} 個用戶 ID。")
+        if cursor: params['cursor'] = cursor
+        r = requests.get(url, headers=headers, params=params)
+        data = r.json()
+        user_ids.extend([item['name'] for item in data['result']])
+        cursor = data['result_info'].get('cursor')
+        if not cursor: break
     return user_ids
 
-
-# ------------------------------
-# ### [修改] LINE 推播 (改用 Multicast API 支援群發)
-# ------------------------------
 def send_line_message_to_all(user_ids, message):
-    if not user_ids:
-        print("⚠ 用戶 ID 清單為空，跳過推播。")
-        return
-
-    # LINE Multicast API 一次最多 500 個 ID，需分批發送
+    if not user_ids: return
     url = "https://api.line.me/v2/bot/message/multicast"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}"
-    }
-
-    # 將 user_ids 分成每批最多 500 個
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}"}
     for i in range(0, len(user_ids), 500):
-        batch_ids = user_ids[i:i + 500]
-
-        body = {
-            "to": batch_ids, # 傳入 ID 清單
-            "messages": [{"type": "text", "text": message}]
-        }
-        r = requests.post(url, headers=headers, json=body)
-
-        if r.status_code == 200:
-            print(f"📨 已送出 LINE 推播到 {len(batch_ids)} 位用戶。")
-        else:
-            print(f"❌ LINE Multicast 失敗 (狀態碼: {r.status_code}, 回覆: {r.text})")
-
+        body = {"to": user_ids[i:i + 500], "messages": [{"type": "text", "text": message}]}
+        requests.post(url, headers=headers, json=body)
 
 # ------------------------------
-#  主程式 ### [修改] 整合 KV 讀取和群發推播邏輯
+# 主程式
 # ------------------------------
 def main():
-    price = get_tsmc_price()
-
-    # 1. ### [新增] 取得所有用戶 ID
+    tw_time = datetime.utcnow() + timedelta(hours=8)
+    tw_hour = tw_time.hour
+    
     all_users = get_all_user_ids_from_cloudflare()
+    if not all_users: return
 
-    if not all_users:
-        print("無法取得任何用戶 ID，結束運行。")
-        return
-
-    # 2. ### [修改] 檢查價格並送出達標通知
-    if price >= TSMC_TARGET_PRICE:
-        notification_message = f"📈 台積電股價已達 {price} 元！\n（提醒門檻：{TSMC_TARGET_PRICE}）"
-        # 使用新的群發函數
-        send_line_message_to_all(all_users, notification_message)
-    else:
-        print(f"目前價格 {price}，未達通知條件")
-
-    # 3. ### [修改] 送出每日收盤價通知給所有用戶
-    daily_message = f"📢 tsmc 今日收盤價：{price} 元"
-    send_line_message_to_all(all_users, daily_message)
+    # 早上 7 點執行天氣任務 (每天)
+    if tw_hour == 7:
+        weather_msg = get_weather_report()
+        send_line_message_to_all(all_users, weather_msg)
+    
+    # 下午 14 點執行股價任務 (由 YAML 控制週一至五執行)
+    elif 13 <= tw_hour <= 15:
+        price = get_tsmc_price()
+        if price >= TSMC_TARGET_PRICE:
+            msg = f"📈 台積電股價已達 {price} 元！\n（提醒門檻：{TSMC_TARGET_PRICE}）"
+            send_line_message_to_all(all_users, msg)
+        send_line_message_to_all(all_users, f"📢 tsmc 今日收盤價：{price} 元")
 
 if __name__ == "__main__":
     main()
