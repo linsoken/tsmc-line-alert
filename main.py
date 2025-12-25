@@ -127,7 +127,7 @@ def main():
     tw_hour = tw_time.hour
 
     # 早上 7 點推送天氣
-    if tw_hour == 7:
+    if tw_hour == True:
         report = get_weather_report()
         send_line_message_to_all(all_users, report)
     
