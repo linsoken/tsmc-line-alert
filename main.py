@@ -34,56 +34,53 @@ def get_weather_report():
             r = requests.get(url, params={"Authorization": CWA_API_KEY}, timeout=15)
             data = r.json()
             records = data.get("records", {})
-            
-            # 支援大小寫 Locations
             locs_container = records.get("Locations") or records.get("locations")
             if not locs_container: continue
-            
-            # 支援大小寫 location
             locations = locs_container[0].get("location") or locs_container[0].get("Location")
             if not locations: continue
 
             for loc in locations:
                 name = loc.get("locationName", "").replace("區", "").replace("鄉", "").replace("市", "")
-                
-                # 支援大小寫 weatherElement
                 w_elements = loc.get("weatherElement") or loc.get("WeatherElement")
                 if not w_elements: continue
                 
+                # 建立氣象字典，同時支援中文與英文 Key
                 elements_map = {}
                 for e in w_elements:
-                    # 支援大小寫 elementName
                     e_name = e.get('elementName') or e.get('ElementName')
-                    # 支援大小寫 time
                     times = e.get('time') or e.get('Time')
-                    
-                    if e_name and times and len(times) > 0:
-                        # 支援大小寫 elementValue
+                    if e_name and times:
                         val_obj = times[0].get('elementValue') or times[0].get('ElementValue')
-                        if val_obj and len(val_obj) > 0:
+                        if val_obj:
                             elements_map[e_name] = val_obj[0].get('value', '--')
                 
-                t = elements_map.get('T') or elements_map.get('Temperature', '--')
-                wx = elements_map.get('Wx') or elements_map.get('Weather', '--')
-                pop = elements_map.get('PoP12h') or elements_map.get('ProbabilityOfPrecipitation', '0')
+                # 同時檢查中文與英文欄位名稱
+                t = elements_map.get('T') or elements_map.get('溫度', '--')
+                wx = elements_map.get('Wx') or elements_map.get('天氣現象', '--')
+                pop = elements_map.get('PoP12h') or elements_map.get('12小時降雨機率', '0')
                 weather_cache[name] = f"{name} {t}°{wx}({pop}%)"
-        except Exception as e:
-            print(f"DEBUG: 解析 {api_id} 失敗: {e}")
+        except:
             continue
 
-    if not weather_cache: return "❌ 氣象資料解析失敗，請稍後再試。"
+    if not weather_cache: return "❌ 氣象資料解析失敗"
 
     tw_time = datetime.utcnow() + timedelta(hours=8)
     week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
 
     final_msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
-    for group in [taipei_list, new_taipei_list, yilan_list]:
-        nodes = [weather_cache[n] for n in group if n in weather_cache]
-        if nodes: final_msg += "\n".join(nodes) + "\n\n"
     
-    final_msg += "天氣多變請多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
-    return final_msg.strip()
+    t_nodes = [weather_cache[n] for n in taipei_list if n in weather_cache]
+    if t_nodes: final_msg += "\n".join(t_nodes) + "\n\n"
+    
+    n_nodes = [weather_cache[n] for n in new_taipei_list if n in weather_cache]
+    if n_nodes: final_msg += "\n".join(n_nodes) + "\n\n"
+    
+    y_nodes = [weather_cache[n] for n in yilan_list if n in weather_cache]
+    if y_nodes: final_msg += "\n".join(y_nodes)
+
+    final_msg += "\n\n天氣變化多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
+    return final_msg
 
 def get_all_user_ids_from_cloudflare():
     url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
@@ -108,8 +105,6 @@ def main():
     tw_time = datetime.utcnow() + timedelta(hours=8)
     tw_hour = tw_time.hour
 
-    # 無論何時執行，手動觸發都會發送天氣（方便測試）
-    # 正式排程則會自動在 7 點與 14 點運作
     if tw_hour == 7:
         send_line_message_to_all(all_users, get_weather_report())
     elif 13 <= tw_hour <= 15:
@@ -119,7 +114,7 @@ def main():
                 send_line_message_to_all(all_users, f"📈 台積電股價已達 {price} 元！")
             send_line_message_to_all(all_users, f"📢 tsmc 今日最新價：{price} 元")
     else:
-        # 手動測試用邏輯
+        # 手動執行時發送天氣訊息
         send_line_message_to_all(all_users, get_weather_report())
 
 if __name__ == "__main__":
