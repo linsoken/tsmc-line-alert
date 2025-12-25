@@ -27,42 +27,39 @@ def get_weather_report():
             r = requests.get(url, params={"Authorization": CWA_API_KEY}, timeout=15)
             data = r.json()
             
-            # 根據截圖精確定位：records -> Locations[0] -> Location (大寫 L)
+            # 第一層：取得 records
             records = data.get("records", {})
+            # 第二層：Locations (截圖顯示是大寫且為 List)
             locations_outer = records.get("Locations") or records.get("locations")
-            if not locations_outer: continue
+            if not locations_outer or not isinstance(locations_outer, list): continue
             
-            # 關鍵點：截圖顯示內部行政區清單的 Key 是 "Location" (單數/大寫)
+            # 第三層：Location (截圖顯示內部行政區清單是大寫 Location)
             location_list = locations_outer[0].get("Location") or locations_outer[0].get("location")
             if not location_list: continue
 
             for loc in location_list:
                 api_name = loc.get("locationName", "")
                 
-                # 模糊比對地區
-                matched_key = None
-                for t in all_targets:
-                    if t in api_name:
-                        matched_key = t
-                        break
-                
+                # 模糊比對地區 (包含「松山」即匹配)
+                matched_key = next((t for t in all_targets if t in api_name), None)
                 if not matched_key: continue
                 
-                # 擷取氣象元素：截圖顯示是 "WeatherElement" (大寫 W)
+                # 第四層：WeatherElement (大寫 W)
                 elements = loc.get("WeatherElement") or loc.get("weatherElement") or []
                 t, wx, pop = "--", "--", "0"
                 
                 for e in elements:
                     ename = e.get("ElementName") or e.get("elementName") or ""
+                    # 第五層：Time (大寫 T)
                     times = e.get("Time") or e.get("time") or []
                     if not times: continue
                     
-                    # 擷取數值：截圖顯示是 "ElementValue" (大寫 E)
+                    # 第六層：ElementValue (大寫 E)
                     val_list = times[0].get("ElementValue") or times[0].get("elementValue") or []
                     if not val_list: continue
                     
-                    # 針對溫度 (T) 和 降雨機率 (PoP12h) 取值
-                    val = val_list[0].get("value") or val_list[0].get("Temperature") or "--"
+                    # 抓取數值 (有些欄位名為 value，有些為 Temperature)
+                    val = val_list[0].get("value") or val_list[0].get("value") or "--"
                     
                     if ename in ["T", "溫度"]: t = val
                     elif ename in ["Wx", "天氣現象"]: wx = val
@@ -93,6 +90,7 @@ def get_weather_report():
     final_msg += "天氣多變請多留意，阿賢祝福您吉祥如意闔家平安幸福永相隨。"
     return final_msg.strip()
 
+# --- 傳送邏輯 ---
 def get_all_user_ids_from_cloudflare():
     url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
