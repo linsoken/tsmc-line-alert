@@ -35,36 +35,43 @@ def get_weather_report():
             data = r.json()
             records = data.get("records", {})
             
-            # 修正 1：相容 Locations 或 locations
+            # 支援大小寫 Locations
             locs_container = records.get("Locations") or records.get("locations")
             if not locs_container: continue
             
-            # 修正 2：相容 location 欄位
+            # 支援大小寫 location
             locations = locs_container[0].get("location") or locs_container[0].get("Location")
             if not locations: continue
 
             for loc in locations:
                 name = loc.get("locationName", "").replace("區", "").replace("鄉", "").replace("市", "")
                 
-                # 修正 3：相容 weatherElement 大小寫
+                # 支援大小寫 weatherElement
                 w_elements = loc.get("weatherElement") or loc.get("WeatherElement")
                 if not w_elements: continue
                 
-                # 修正 4：相容 elementName 大小寫
-                elements = {
-                    (e.get('elementName') or e.get('ElementName')): e['time'][0]['elementValue'][0]['value'] 
-                    for e in w_elements
-                }
+                elements_map = {}
+                for e in w_elements:
+                    # 支援大小寫 elementName
+                    e_name = e.get('elementName') or e.get('ElementName')
+                    # 支援大小寫 time
+                    times = e.get('time') or e.get('Time')
+                    
+                    if e_name and times and len(times) > 0:
+                        # 支援大小寫 elementValue
+                        val_obj = times[0].get('elementValue') or times[0].get('ElementValue')
+                        if val_obj and len(val_obj) > 0:
+                            elements_map[e_name] = val_obj[0].get('value', '--')
                 
-                t = elements.get('T') or elements.get('Temperature', '--')
-                wx = elements.get('Wx') or elements.get('Weather', '--')
-                pop = elements.get('PoP12h') or elements.get('ProbabilityOfPrecipitation', '0')
+                t = elements_map.get('T') or elements_map.get('Temperature', '--')
+                wx = elements_map.get('Wx') or elements_map.get('Weather', '--')
+                pop = elements_map.get('PoP12h') or elements_map.get('ProbabilityOfPrecipitation', '0')
                 weather_cache[name] = f"{name} {t}°{wx}({pop}%)"
         except Exception as e:
             print(f"DEBUG: 解析 {api_id} 失敗: {e}")
             continue
 
-    if not weather_cache: return "❌ 氣象資料解析失敗"
+    if not weather_cache: return "❌ 氣象資料解析失敗，請稍後再試。"
 
     tw_time = datetime.utcnow() + timedelta(hours=8)
     week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -101,6 +108,8 @@ def main():
     tw_time = datetime.utcnow() + timedelta(hours=8)
     tw_hour = tw_time.hour
 
+    # 無論何時執行，手動觸發都會發送天氣（方便測試）
+    # 正式排程則會自動在 7 點與 14 點運作
     if tw_hour == 7:
         send_line_message_to_all(all_users, get_weather_report())
     elif 13 <= tw_hour <= 15:
@@ -110,7 +119,7 @@ def main():
                 send_line_message_to_all(all_users, f"📈 台積電股價已達 {price} 元！")
             send_line_message_to_all(all_users, f"📢 tsmc 今日最新價：{price} 元")
     else:
-        # 手動測試用
+        # 手動測試用邏輯
         send_line_message_to_all(all_users, get_weather_report())
 
 if __name__ == "__main__":
