@@ -3,118 +3,94 @@ import os
 import json
 from datetime import datetime, timedelta
 
-# --- 環境變數 ---
+# --- 環境變數直接讀取 ---
 CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID")
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID")
-CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-CWA_API_KEY = os.environ.get("CWA_API_KEY")
+LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+CWA_KEY = os.environ.get("CWA_API_KEY")
 
-# ------------------------------
-# 1. 基礎發送函式
-# ------------------------------
-def send_line(users, text):
-    if not users or not text: return
+def send_to_line(user_ids, text):
+    if not user_ids or not text: return
+    print(f"📡 準備發送 LINE 訊息給 {len(user_ids)} 人...")
     url = "https://api.line.me/v2/bot/message/multicast"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}"}
-    payload = {"to": users, "messages": [{"type": "text", "text": str(text)}]}
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
+    payload = {"to": user_ids, "messages": [{"type": "text", "text": str(text)}]}
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=15)
-        print(f"🚀 LINE 發送狀態: {res.status_code}, 回應: {res.text}")
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        print(f"🚀 LINE 回應: {r.status_code}, {r.text}")
     except Exception as e:
-        print(f"❌ LINE 發送失敗: {e}")
+        print(f"❌ LINE 發送崩潰: {e}")
 
-# ------------------------------
-# 2. 氣象預報解析
-# ------------------------------
-def get_weather_report():
-    if not CWA_API_KEY: return "⚠️ 缺少氣象金鑰"
+def get_weather():
+    print("☁️ 正在抓取氣象資料...")
+    districts = ["北投區", "萬華區", "信義區", "淡水區", "礁溪鄉"]
+    api_ids = {"F-D0047-063": districts, "F-D0047-071": districts, "F-D0047-003": districts}
+    results = {}
     
-    api_map = {"F-D0047-063": ["北投區", "萬華區", "信義區"], "F-D0047-071": ["淡水區"], "F-D0047-003": ["礁溪鄉"]}
-    target_districts = ["北投區", "萬華區", "信義區", "淡水區", "礁溪鄉"]
-    weather_map = {}
-    
-    for api_id, dists in api_map.items():
-        try:
-            url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{api_id}"
-            params = {"Authorization": CWA_API_KEY, "format": "JSON"}
-            r = requests.get(url, params=params, timeout=20)
-            if r.status_code != 200: continue
-            
-            data = r.json()
-            # 鄉鎮預報結構
-            locations = data.get('records', {}).get('locations', [{}])[0].get('location', [])
-            for loc in locations:
-                name = loc.get('locationName')
-                if name in target_districts:
-                    info = {}
-                    for elem in loc.get('weatherElement', []):
-                        e_name = elem.get('elementName')
-                        # 抓取第一筆預報
-                        times = elem.get('time', [])
-                        if times:
-                            val = times[0].get('elementValue', [{}])[0].get('value')
-                            info[e_name] = val
-                    weather_map[name] = info
-        except: continue
+    try:
+        for aid in api_ids.keys():
+            # 這裡縮短 timeout 到 5 秒，避免卡死
+            api_url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{aid}?Authorization={CWA_KEY}&format=JSON"
+            resp = requests.get(api_url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                locs = data.get('records', {}).get('locations', [{}])[0].get('location', [])
+                for l in locs:
+                    name = l.get('locationName')
+                    if name in districts:
+                        info = {e.get('elementName'): e.get('time', [{}])[0].get('elementValue', [{}])[0].get('value') 
+                                for e in l.get('weatherElement', [])}
+                        results[name] = info
+    except Exception as e:
+        print(f"⚠️ 氣象抓取中斷: {e}")
 
-    tw_now = datetime.utcnow() + timedelta(hours=8)
-    week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-    date_str = tw_now.strftime("%m/%d") + f" ({week_list[tw_now.weekday()]})"
-    
-    msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
-    for d in target_districts:
-        w = weather_map.get(d, {})
-        if w.get('Wx'):
+    now = datetime.utcnow() + timedelta(hours=8)
+    msg = f"🌤 一分鐘報天氣 {now.strftime('%m/%d')} 🌤\n\n"
+    for d in districts:
+        w = results.get(d)
+        if w and w.get('Wx'):
             msg += f"📍 {d} {w.get('MinT')}~{w.get('MaxT')}° {w.get('Wx')} (降雨{w.get('PoP12h')}%)\n"
         else:
-            msg += f"📍 {d} 讀取中\n"
-    
-    msg += "\n天氣變化多留意，祝福您吉祥如意闔家平安幸福永相隨。"
+            msg += f"📍 {d} 資料獲取失敗\n"
+    msg += "\n天氣變化多留意，祝福吉祥如意。"
     return msg
 
-# ------------------------------
-# 3. 主程式
-# ------------------------------
 def main():
-    # 取得用戶
+    # 1. 取得用戶 (最優先)
+    print("🔍 正在讀取 Cloudflare KV...")
+    users = []
     try:
-        url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
-        r = requests.get(url, headers={"Authorization": f"Bearer {CF_API_TOKEN}"}, timeout=10)
+        kv_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
+        r = requests.get(kv_url, headers={"Authorization": f"Bearer {CF_API_TOKEN}"}, timeout=10)
         users = [item['name'] for item in r.json().get('result', [])]
         print(f"✅ 成功讀取用戶數: {len(users)}")
-    except:
-        print("❌ 用戶讀取失敗")
+    except Exception as e:
+        print(f"❌ KV 讀取失敗: {e}")
         return
 
+    # 2. 股價 (次優先)
+    print("📈 正在抓取股價...")
+    price_msg = "📢 股價抓取失敗"
+    try:
+        p_res = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/2330.TW", 
+                             headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        price = p_res.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
+        price_msg = f"📢 TSMC 目前股價：{price} 元"
+    except: pass
+
+    # 3. 發送 (分開兩則訊息發送，確保至少收到一則)
     tw_hour = (datetime.utcnow() + timedelta(hours=8)).hour
-
-    # 早上 7 點發天氣
+    
     if tw_hour == 7:
-        send_line(users, get_weather_report())
-        
-    # 下午 1-3 點發股價
+        send_to_line(users, get_weather())
     elif 13 <= tw_hour <= 15:
-        try:
-            r = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/2330.TW", headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
-            price = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-            if tw_hour == 14:
-                send_line(users, f"📢 TSMC 今日參考價：{price} 元")
-        except: pass
-
-    # 測試模式
+        send_to_line(users, price_msg)
     else:
-        print("🔧 執行測試模式...")
-        # 1. 先試發股價 (確保 LINE 通訊沒問題)
-        try:
-            r = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/2330.TW", headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
-            p = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-            send_line(users, f"📢 測試成功！目前 TSMC 股價：{p} 元")
-        except:
-            send_line(users, "📢 測試股價抓取失敗")
-            
-        # 2. 再發天氣
-        send_line(users, get_weather_report())
+        # 測試模式：先發股價，再發天氣
+        print("🛠 執行測試發送...")
+        send_to_line(users, price_msg)
+        send_to_line(users, get_weather())
 
 if __name__ == "__main__":
     main()
