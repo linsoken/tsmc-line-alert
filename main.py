@@ -13,39 +13,36 @@ CWA_API_KEY = os.environ.get("CWA_API_KEY")
 TSMC_TARGET_PRICE = 1600  # 您要通知的價格門檻
 
 # ------------------------------
-# 氣象預報函式 (優化版：自動查找鄉鎮區)
+# 氣象預報函式 (分縣市精確抓取，解決讀取中問題)
 # ------------------------------
 def get_weather_report():
     if not CWA_API_KEY:
         return "⚠️ 缺少 CWA_API_KEY，無法取得氣象資訊。"
     
-    # 鄉鎮預報 API (F-D0047-089)
-    url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-D0047-089"
-    
-    # 指定要抓取的目標地區
+    # 063: 台北市, 071: 新北市, 003: 宜蘭縣
+    api_ids = ["F-D0047-063", "F-D0047-071", "F-D0047-003"]
     target_districts = ["北投區", "萬華區", "信義區", "淡水區", "礁溪鄉"]
     
-    # 參數設定：不使用過濾參數，確保資料夾層級完整
-    params = {
-        "Authorization": CWA_API_KEY,
-        "format": "JSON",
-        "elementName": "Wx,PoP12h,MinT,MaxT"
-    }
+    weather_map = {}
     
-    try:
-        # 資料包較大，超時時間設長
-        r = requests.get(url, params=params, timeout=30)
-        data = r.json()
-        
-        weather_map = {}
-        
-        # 解析邏輯：遍歷所有縣市 (Locations)
-        records = data.get("records", {})
-        locations_list = records.get("locations", [])
-        
-        for county in locations_list:
-            # 在每個縣市中遍歷所有鄉鎮 (Location)
-            for loc in county.get("location", []):
+    for api_id in api_ids:
+        url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{api_id}"
+        params = {
+            "Authorization": CWA_API_KEY,
+            "format": "JSON",
+            "elementName": "Wx,PoP12h,MinT,MaxT"
+        }
+        try:
+            r = requests.get(url, params=params, timeout=20)
+            if r.status_code != 200:
+                print(f"API {api_id} 請求失敗")
+                continue
+                
+            data = r.json()
+            # 取得該縣市下的所有鄉鎮
+            locations = data.get("records", {}).get("locations", [{}])[0].get("location", [])
+            
+            for loc in locations:
                 dist_name = loc.get("locationName")
                 if dist_name in target_districts:
                     elements = loc.get("weatherElement", [])
@@ -54,34 +51,34 @@ def get_weather_report():
                         eid = elem.get("elementName")
                         times = elem.get("time", [])
                         if times:
-                            # 抓取第一個時段 (當前/未來 12 小時)
+                            # 抓取第一時段預報值
                             val = times[0].get("elementValue", [{}])[0].get("value")
                             info[eid] = val
                     weather_map[dist_name] = info
+        except Exception as e:
+            print(f"抓取 API {api_id} 出錯: {e}")
 
-        # 組合時間標題 (台灣時間)
-        tw_time = datetime.utcnow() + timedelta(hours=8)
-        week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-        date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
+    # 組合時間與星期
+    tw_time = datetime.utcnow() + timedelta(hours=8)
+    week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
 
-        msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
-        
-        # 依照要求的順序排列顯示
-        for dist in target_districts:
-            w = weather_map.get(dist)
-            if w and w.get('Wx'):
-                # 格式：📍 北投區 17~21° 陰時多雲短暫雨 (降雨60%)
-                msg += f"📍 {dist} {w.get('MinT')}~{w.get('MaxT')}° {w.get('Wx')} (降雨{w.get('PoP12h')}%)\n"
-            else:
-                msg += f"📍 {dist} 資料讀取中\n"
+    msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
+    
+    # 按照您要求的順序輸出
+    for dist in target_districts:
+        w = weather_map.get(dist)
+        if w and w.get('Wx'):
+            # 格式：📍 北投區 17~21° 陰時多雲短暫雨 (降雨60%)
+            msg += f"📍 {dist} {w.get('MinT')}~{w.get('MaxT')}° {w.get('Wx')} (降雨{w.get('PoP12h')}%)\n"
+        else:
+            msg += f"📍 {dist} 資料讀取中\n"
 
-        msg += "\n天氣變化多留意，祝福您吉祥如意闔家平安幸福永相隨。"
-        return msg
-    except Exception as e:
-        return f"❌ 氣象解析失敗: {str(e)}"
+    msg += "\n天氣變化多留意，祝福您吉祥如意闔家平安幸福永相隨。"
+    return msg
 
 # ------------------------------
-# 台積電股價抓取邏輯 (維持雙來源備援)
+# 台積電股價抓取 (Yahoo + FinMind 雙來源)
 # ------------------------------
 def get_price_from_yahoo():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW"
@@ -104,20 +101,19 @@ def get_price_from_finmind():
 def get_tsmc_price():
     price = get_price_from_yahoo()
     if price is not None:
-        print(f"🟢 使用 Yahoo Finance 抓到價格：{price}")
+        print(f"🟢 使用 Yahoo 抓到價格：{price}")
         return price
     price = get_price_from_finmind()
     if price is not None:
         print(f"🟢 使用 FinMind 抓到價格：{price}")
         return price
-    raise Exception("❌ Yahoo + FinMind 都無法取得股價")
+    raise Exception("❌ 無法取得股價")
 
 # ------------------------------
-# Cloudflare KV 用戶取得
+# Cloudflare KV 用戶 ID 取得
 # ------------------------------
 def get_all_user_ids_from_cloudflare():
     if not all([CF_ACCOUNT_ID, CF_API_TOKEN, CF_KV_NAMESPACE_ID]):
-        print("⚠️ 缺少 Cloudflare KV 設定")
         return []
     url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"}
@@ -137,7 +133,7 @@ def get_all_user_ids_from_cloudflare():
     return user_ids
 
 # ------------------------------
-# LINE 群發推播 (Multicast 模式)
+# LINE 推播發送
 # ------------------------------
 def send_line_message_to_all(user_ids, message):
     if not user_ids or not message: return
@@ -146,55 +142,47 @@ def send_line_message_to_all(user_ids, message):
     for i in range(0, len(user_ids), 500):
         batch_ids = user_ids[i:i + 500]
         body = {"to": batch_ids, "messages": [{"type": "text", "text": message}]}
-        r = requests.post(url, headers=headers, json=body, timeout=10)
-        print(f"推播發送狀態: {r.status_code}")
+        requests.post(url, headers=headers, json=body, timeout=10)
 
 # ------------------------------
-# 主程式流程控制
+# 主程式執行逻辑
 # ------------------------------
 def main():
     all_users = get_all_user_ids_from_cloudflare()
     if not all_users:
-        print("❌ 無法取得任何 LINE 用戶 ID，停止執行。")
+        print("❌ 無法取得用戶清單")
         return
 
-    # 台灣當前小時
     tw_now = datetime.utcnow() + timedelta(hours=8)
     tw_hour = tw_now.hour
 
-    # --- 早上 7 點：氣象推播 ---
+    # 早上 7 點：推播氣象
     if tw_hour == 7:
-        print(f"時間 {tw_hour}:00，執行氣象預報...")
         weather_msg = get_weather_report()
         send_line_message_to_all(all_users, weather_msg)
     
-    # --- 下午 1 點到 3 點：台積電監控與收盤通知 ---
+    # 下午 1 點到 3 點：執行台積電監控
     elif 13 <= tw_hour <= 15:
-        print(f"時間 {tw_hour}:00，執行股價監控...")
         try:
             price = get_tsmc_price()
-            # 達標警報
             if price >= TSMC_TARGET_PRICE:
                 msg = f"📈 台積電股價已達 {price} 元！\n（提醒門檻：{TSMC_TARGET_PRICE}）"
                 send_line_message_to_all(all_users, msg)
             
-            # 每日收盤固定回報 (設定在 14 點發送)
-            if tw_hour == 14:
-                daily_msg = f"📢 TSMC 今日參考價：{price} 元"
-                send_line_message_to_all(all_users, daily_msg)
+            if tw_hour == 14: # 14點發送收盤參考價
+                send_line_message_to_all(all_users, f"📢 TSMC 今日收盤/參考價：{price} 元")
         except Exception as e:
             print(f"股價監控出錯: {e}")
 
-    # --- 非定時區間：測試模式 ---
+    # 其他時間（測試或手動觸發）
     else:
-        print(f"目前時間 {tw_hour}:00 (測試模式)，同時發送氣象與股價...")
         weather_msg = get_weather_report()
         send_line_message_to_all(all_users, weather_msg)
         try:
             price = get_tsmc_price()
-            send_line_message_to_all(all_users, f"📢 股價測試成功：{price} 元")
+            send_line_message_to_all(all_users, f"📢 測試模式：目前股價 {price} 元")
         except:
-            print("測試模式股價抓取失敗。")
+            print("測試模式股價抓取失敗")
 
 if __name__ == "__main__":
     main()
