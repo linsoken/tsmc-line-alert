@@ -21,7 +21,6 @@ def get_precise_weather():
     
     for item in dist_configs:
         try:
-            # 請求 API
             url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{item['id']}?Authorization={CWA_KEY}&format=JSON&locationName={item['name']}&elementName=Wx,MinT,MaxT,PoP12h"
             r = requests.get(url, timeout=15)
             if r.status_code != 200:
@@ -30,31 +29,40 @@ def get_precise_weather():
 
             data = r.json()
             
-            # --- 強健路徑搜尋法 ---
-            # 氣象局的結構在篩選後可能直接在 records['locations'][0]['location'][0]
-            # 或是 records['location'][0]
+            # --- 核心邏輯：暴力搜尋 location 節點 ---
+            # 直接從 records 開始往下找任何層級的 location 列表
             records = data.get('records', {})
-            locations_container = records.get('locations', [{}])[0]
-            location_list = locations_container.get('location', records.get('location', []))
-
-            if not location_list:
-                results.append(f"📍 {item['name']} 資料格式變更")
+            
+            # 這是鄉鎮預報最穩定的路徑提取方式
+            all_locations = []
+            if 'locations' in records:
+                all_locations = records['locations'][0].get('location', [])
+            elif 'location' in records:
+                all_locations = records['location']
+            
+            # 鎖定該行政區
+            target_loc = None
+            for loc in all_locations:
+                if loc.get('locationName') == item['name']:
+                    target_loc = loc
+                    break
+            
+            if not target_loc:
+                results.append(f"📍 {item['name']} 讀取不到")
                 continue
 
-            loc_data = location_list[0]
-            elements = loc_data.get('weatherElement', [])
+            # 抓取天氣元素
             e_map = {}
-            
-            for elem in elements:
-                name = elem.get('elementName')
-                # 遍歷所有時段，抓取第一個有數值的
+            for elem in target_loc.get('weatherElement', []):
+                e_name = elem.get('elementName')
+                # 遍歷時段直到找到第一個有值的值
                 for t in elem.get('time', []):
-                    val = t.get('elementValue', [{}])[0].get('value')
-                    if val is not None and str(val).strip():
-                        e_map[name] = val
+                    # 部分數值存在於 elementValue 的第一項
+                    vals = t.get('elementValue', [])
+                    if vals and vals[0].get('value'):
+                        e_map[e_name] = vals[0]['value']
                         break
             
-            # 組合輸出
             wx = e_map.get('Wx', '未知')
             mint = e_map.get('MinT', '--')
             maxt = e_map.get('MaxT', '--')
@@ -63,7 +71,8 @@ def get_precise_weather():
             results.append(f"📍 {item['name']} {mint}~{maxt}° {wx} (降雨{pop}%)")
             
         except Exception as e:
-            results.append(f"📍 {item['name']} 系統繁忙")
+            print(f"Error fetching {item['name']}: {e}")
+            results.append(f"📍 {item['name']} 更新中")
             
     return "\n".join(results)
 
