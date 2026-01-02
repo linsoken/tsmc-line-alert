@@ -27,21 +27,19 @@ def get_precise_weather():
             
             if r.status_code == 200:
                 data = r.json()
-                # 關鍵修正：在篩選模式下，records 下一層直接提取 location
-                # 氣象署結構: records -> locations[0] -> location[0]
+                # 自動尋找 location 節點，適應篩選後的結構
                 records = data.get('records', {})
-                locs_node = records.get('locations', [{}])[0]
-                loc_list = locs_node.get('location', [])
+                # 在篩選模式下，location 可能直接存在於 records 下，或在 locations[0] 裡
+                locations_node = records.get('locations', [{}])[0]
+                loc_list = locations_node.get('location', records.get('location', []))
                 
                 if loc_list:
                     loc_data = loc_list[0]
                     elements = loc_data.get('weatherElement', [])
-                    
-                    # 建立暫存字典，自動尋找第一個有數值的時段
                     e_map = {}
                     for elem in elements:
                         e_name = elem.get('elementName')
-                        # 遍歷時間區段，直到找到非空值
+                        # 遍歷時間段尋找有效值
                         for t_block in elem.get('time', []):
                             val = t_block.get('elementValue', [{}])[0].get('value')
                             if val and val.strip() and val != " ":
@@ -52,12 +50,11 @@ def get_precise_weather():
                     mint = e_map.get('MinT', '--')
                     maxt = e_map.get('MaxT', '--')
                     pop = e_map.get('PoP12h', '0')
-                    
                     results.append(f"📍 {item['name']} {mint}~{maxt}° {wx} (降雨{pop}%)")
                 else:
-                    results.append(f"📍 {item['name']} 資料解析失敗")
+                    results.append(f"📍 {item['name']} 找不到區域資料")
             else:
-                results.append(f"📍 {item['name']} 服務忙碌({r.status_code})")
+                results.append(f"📍 {item['name']} 服務忙碌")
         except Exception as e:
             print(f"Error fetching {item['name']}: {e}")
             results.append(f"📍 {item['name']} 讀取超時")
@@ -80,21 +77,12 @@ def main():
         p_res = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/2330.TW", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         price = p_res.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
         price_info = f"📈 TSMC 目前股價：{price} 元"
-        if price >= 1600:
-            price_info += "\n🚨 【目標達成】台積電已達 1600 元！"
-    except: 
-        price_info = "📈 股價資訊更新中"
+    except: price_info = "📈 股價資訊更新中"
 
     # 3. 組合訊息
     now = datetime.utcnow() + timedelta(hours=8)
     weather_report = get_precise_weather()
-    
-    final_msg = (
-        f"🌤 一分鐘報天氣 {now.strftime('%m/%d')} 🌤\n\n"
-        f"{weather_report}\n\n"
-        f"{price_info}\n\n"
-        f"天氣變化多留意，祝吉祥如意，平安幸福。"
-    )
+    final_msg = f"🌤 一分鐘報天氣 {now.strftime('%m/%d')} 🌤\n\n{weather_report}\n\n{price_info}\n\n天氣變化多留意，祝吉祥如意，平安幸福。"
 
     # 4. LINE 發送
     if users:
