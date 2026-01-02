@@ -21,32 +21,33 @@ def get_precise_weather():
     
     for item in dist_configs:
         try:
-            # 請求 API 並過濾該行政區的 4 個核心天氣元素
+            # 鄉鎮預報 API 篩選路徑
             url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{item['id']}?Authorization={CWA_KEY}&format=JSON&locationName={item['name']}&elementName=Wx,MinT,MaxT,PoP12h"
             r = requests.get(url, timeout=12)
             
             if r.status_code == 200:
                 data = r.json()
-                # 重新定位資料層級 (在有 Filter 的情況下，records 下層通常直接是 locations)
+                # 關鍵修正：在篩選模式下，records 下一層直接提取 location
+                # 氣象署結構: records -> locations[0] -> location[0]
                 records = data.get('records', {})
-                locs_list = records.get('locations', [{}])[0].get('location', [])
+                locs_node = records.get('locations', [{}])[0]
+                loc_list = locs_node.get('location', [])
                 
-                if locs_list:
-                    loc_data = locs_list[0]
+                if loc_list:
+                    loc_data = loc_list[0]
                     elements = loc_data.get('weatherElement', [])
                     
-                    # 建立暫存字典，並自動尋找第一個有數值的時段
+                    # 建立暫存字典，自動尋找第一個有數值的時段
                     e_map = {}
                     for elem in elements:
                         e_name = elem.get('elementName')
-                        # 逐一檢查該元素的時間序列，直到找到非空值
-                        for t in elem.get('time', []):
-                            val = t.get('elementValue', [{}])[0].get('value')
-                            if val and val.strip():
+                        # 遍歷時間區段，直到找到非空值
+                        for t_block in elem.get('time', []):
+                            val = t_block.get('elementValue', [{}])[0].get('value')
+                            if val and val.strip() and val != " ":
                                 e_map[e_name] = val
                                 break
                     
-                    # 提取並組合字串
                     wx = e_map.get('Wx', '未知')
                     mint = e_map.get('MinT', '--')
                     maxt = e_map.get('MaxT', '--')
@@ -54,12 +55,12 @@ def get_precise_weather():
                     
                     results.append(f"📍 {item['name']} {mint}~{maxt}° {wx} (降雨{pop}%)")
                 else:
-                    results.append(f"📍 {item['name']} 找不到區域節點")
+                    results.append(f"📍 {item['name']} 資料解析失敗")
             else:
-                results.append(f"📍 {item['name']} API繁忙({r.status_code})")
+                results.append(f"📍 {item['name']} 服務忙碌({r.status_code})")
         except Exception as e:
-            print(f"Error at {item['name']}: {e}")
-            results.append(f"📍 {item['name']} 讀取中")
+            print(f"Error fetching {item['name']}: {e}")
+            results.append(f"📍 {item['name']} 讀取超時")
             
     return "\n".join(results)
 
@@ -73,7 +74,7 @@ def main():
         print(f"✅ 成功讀取用戶數: {len(users)}")
     except: return
 
-    # 2. 抓取股價與達標判斷
+    # 2. 抓取股價
     price_info = ""
     try:
         p_res = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/2330.TW", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
@@ -95,7 +96,7 @@ def main():
         f"天氣變化多留意，祝吉祥如意，平安幸福。"
     )
 
-    # 4. 發送 LINE Multicast
+    # 4. LINE 發送
     if users:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
         payload = {"to": users, "messages": [{"type": "text", "text": final_msg}]}
