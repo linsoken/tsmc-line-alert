@@ -21,29 +21,31 @@ def get_precise_weather():
     
     for item in dist_configs:
         try:
-            # 使用篩選器，只抓該區的 Wx, MinT, MaxT, PoP12h
+            # 請求鄉鎮預報，限制只抓必要的 4 個天氣元素
             url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{item['id']}?Authorization={CWA_KEY}&format=JSON&locationName={item['name']}&elementName=Wx,MinT,MaxT,PoP12h"
             r = requests.get(url, timeout=12)
             
             if r.status_code == 200:
                 data = r.json()
-                # 關鍵修正：針對篩選後的結構進行極簡化抓取
-                # 結構通常為: records -> locations[0] -> location[0]
-                records = data.get('records', {})
-                locs_node = records.get('locations', [{}])[0]
-                loc_data = locs_node.get('location', [{}])[0]
-                
+                # 取得該行政區的所有天氣元素
+                loc_data = data.get('records', {}).get('locations', [{}])[0].get('location', [{}])[0]
                 elements = loc_data.get('weatherElement', [])
-                # 將天氣元素存入字典，取第一筆時間區間的值
+                
                 e_map = {}
                 for elem in elements:
-                    name = elem.get('elementName')
+                    e_name = elem.get('elementName')
                     times = elem.get('time', [])
-                    if times:
-                        val = times[0].get('elementValue', [{}])[0].get('value')
-                        e_map[name] = val
+                    
+                    # 邏輯優化：尋找第一個有數值的時段 (避免剛好切換時段造成的空白)
+                    val = "--"
+                    for t in times:
+                        v = t.get('elementValue', [{}])[0].get('value')
+                        if v and v != " ":
+                            val = v
+                            break
+                    e_map[e_name] = val
                 
-                # 格式化輸出
+                # 格式化輸出，確保數值存在
                 wx = e_map.get('Wx', '未知')
                 mint = e_map.get('MinT', '--')
                 maxt = e_map.get('MaxT', '--')
@@ -52,23 +54,21 @@ def get_precise_weather():
                 results.append(f"📍 {item['name']} {mint}~{maxt}° {wx} (降雨{pop}%)")
             else:
                 results.append(f"📍 {item['name']} 服務繁忙")
-        except Exception as e:
-            print(f"Error on {item['name']}: {e}")
-            results.append(f"📍 {item['name']} 資料讀取中")
+        except:
+            results.append(f"📍 {item['name']} 讀取中")
             
     return "\n".join(results)
 
 def main():
-    # 1. 取得用戶 (Cloudflare KV)
+    # 1. 取得用戶
     users = []
     try:
         kv_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
         r = requests.get(kv_url, headers={"Authorization": f"Bearer {CF_API_TOKEN}"}, timeout=10)
         users = [item['name'] for item in r.json().get('result', [])]
-        print(f"✅ 成功讀取用戶數: {len(users)}")
     except: return
 
-    # 2. 抓取股價與達標判斷
+    # 2. 抓取股價
     price_info = ""
     try:
         p_res = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/2330.TW", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
@@ -76,8 +76,7 @@ def main():
         price_info = f"📈 TSMC 目前股價：{price} 元"
         if price >= 1600:
             price_info += "\n🚨 【目標達成】台積電已達 1600 元！"
-    except: 
-        price_info = "📈 股價資訊更新中"
+    except: price_info = "📈 股價資訊更新中"
 
     # 3. 組合訊息
     now = datetime.utcnow() + timedelta(hours=8)
@@ -90,7 +89,7 @@ def main():
         f"天氣變化多留意，祝吉祥如意，平安幸福。"
     )
 
-    # 4. 發送 LINE Multicast
+    # 4. 發送
     if users:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
         payload = {"to": users, "messages": [{"type": "text", "text": final_msg}]}
