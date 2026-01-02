@@ -11,53 +11,49 @@ CWA_KEY = os.environ.get("CWA_API_KEY")
 
 def get_precise_weather():
     dist_configs = [
-        {"id": "F-D0047-063", "name": "北投區"},
-        {"id": "F-D0047-063", "name": "萬華區"},
-        {"id": "F-D0047-063", "name": "信義區"},
-        {"id": "F-D0047-071", "name": "淡水區"},
-        {"id": "F-D0047-003", "name": "礁溪鄉"}
+        {"id": "F-D0047-063", "name": "北投"},
+        {"id": "F-D0047-063", "name": "萬華"},
+        {"id": "F-D0047-063", "name": "信義"},
+        {"id": "F-D0047-071", "name": "淡水"},
+        {"id": "F-D0047-003", "name": "礁溪"}
     ]
     results = []
     
     for item in dist_configs:
         try:
+            # 修正：請求時不帶行政層級(區/鄉)，增加匹配成功率
             url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{item['id']}?Authorization={CWA_KEY}&format=JSON&locationName={item['name']}&elementName=Wx,MinT,MaxT,PoP12h"
             r = requests.get(url, timeout=15)
             if r.status_code != 200:
-                results.append(f"📍 {item['name']} 連線異常")
+                results.append(f"📍 {item['name']}區 連線異常")
                 continue
 
             data = r.json()
-            
-            # --- 核心邏輯：暴力搜尋 location 節點 ---
-            # 直接從 records 開始往下找任何層級的 location 列表
             records = data.get('records', {})
             
-            # 這是鄉鎮預報最穩定的路徑提取方式
-            all_locations = []
-            if 'locations' in records:
-                all_locations = records['locations'][0].get('location', [])
+            # 提取 location 列表 (適應各種 API 結構)
+            all_locs = []
+            if 'locations' in records and records['locations']:
+                all_locs = records['locations'][0].get('location', [])
             elif 'location' in records:
-                all_locations = records['location']
+                all_locs = records['location']
             
-            # 鎖定該行政區
+            # 模糊搜尋：只要地名包含我們設定的字眼 (例如 "北投" 匹配 "北投區")
             target_loc = None
-            for loc in all_locations:
-                if loc.get('locationName') == item['name']:
+            for loc in all_locs:
+                if item['name'] in loc.get('locationName', ''):
                     target_loc = loc
                     break
             
             if not target_loc:
-                results.append(f"📍 {item['name']} 讀取不到")
+                results.append(f"📍 {item['name']}區 暫無資料")
                 continue
 
-            # 抓取天氣元素
+            # 解析天氣數值
             e_map = {}
             for elem in target_loc.get('weatherElement', []):
                 e_name = elem.get('elementName')
-                # 遍歷時段直到找到第一個有值的值
                 for t in elem.get('time', []):
-                    # 部分數值存在於 elementValue 的第一項
                     vals = t.get('elementValue', [])
                     if vals and vals[0].get('value'):
                         e_map[e_name] = vals[0]['value']
@@ -68,11 +64,10 @@ def get_precise_weather():
             maxt = e_map.get('MaxT', '--')
             pop = e_map.get('PoP12h', '0')
             
-            results.append(f"📍 {item['name']} {mint}~{maxt}° {wx} (降雨{pop}%)")
+            results.append(f"📍 {item['name']}區 {mint}~{maxt}° {wx} (降雨{pop}%)")
             
         except Exception as e:
-            print(f"Error fetching {item['name']}: {e}")
-            results.append(f"📍 {item['name']} 更新中")
+            results.append(f"📍 {item['name']}區 系統繁忙")
             
     return "\n".join(results)
 
