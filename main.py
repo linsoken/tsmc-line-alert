@@ -1,88 +1,159 @@
 import requests
 import os
+import json
 from datetime import datetime, timedelta
 
 # --- 環境變數 ---
 CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID")
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID")
-LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-CWA_KEY = os.environ.get("CWA_API_KEY")
+CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+CWA_API_KEY = os.environ.get("CWA_API_KEY") 
 
-def get_precise_weather():
-    dist_configs = [
-        {"id": "F-D0047-063", "name": "北投區"},
-        {"id": "F-D0047-063", "name": "萬華區"},
-        {"id": "F-D0047-063", "name": "信義區"},
-        {"id": "F-D0047-071", "name": "淡水區"},
-        {"id": "F-D0047-003", "name": "礁溪鄉"}
-    ]
-    results = []
+TSMC_TARGET_PRICE = 1600  # 您要通知的價格
+
+# ------------------------------
+# 氣象預報函式 (使用最穩定的 F-C0032-001)
+# ------------------------------
+def get_weather_report():
+    if not CWA_API_KEY:
+        return "⚠️ 缺少 CWA_API_KEY，無法取得氣象資訊。"
     
-    for item in dist_configs:
+    url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001"
+    params = {"Authorization": CWA_API_KEY, "format": "JSON", "locationName": ["臺北市", "新北市", "宜蘭縣"]}
+    
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        data = r.json()
+        locations = data.get("records", {}).get("location", [])
+        
+        weather_results = {}
+        for loc in locations:
+            city = loc.get("locationName", "")
+            elements = loc.get("weatherElement", [])
+            wx = elements[0]['time'][0]['parameter']['parameterName']
+            pop = elements[1]['time'][0]['parameter']['parameterName']
+            min_t = elements[2]['time'][0]['parameter']['parameterName']
+            max_t = elements[4]['time'][0]['parameter']['parameterName']
+            weather_results[city] = f"📍 {city} {min_t}~{max_t}° {wx} (降雨{pop}%)"
+        
+        tw_time = datetime.utcnow() + timedelta(hours=8)
+        week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
+
+        msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
+        msg += f"{weather_results.get('臺北市', '📍 臺北市 資料讀取中')}\n"
+        msg += f"{weather_results.get('新北市', '📍 新北市 資料讀取中')}\n"
+        msg += f"{weather_results.get('宜蘭縣', '📍 宜蘭縣 資料讀取中')}\n\n"
+        msg += "天氣變化多留意，祝福您吉祥如意闔家平安幸福永相隨。"
+        return msg
+    except Exception as e:
+        return f"❌ 氣象解析失敗: {str(e)}"
+
+# ------------------------------
+# 台積電股價抓取 (保留您原本的雙來源邏輯)
+# ------------------------------
+def get_price_from_yahoo():
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200: return None
+        data = r.json()
+        return data["chart"]["result"][0]["meta"]["regularMarketPrice"]
+    except: return None
+
+def get_price_from_finmind():
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {"dataset": "TaiwanStockPrice", "data_id": "2330", "start_date": "2024-01-01"}
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        return r.json()["data"][-1]["close"]
+    except: return None
+
+def get_tsmc_price():
+    price = get_price_from_yahoo()
+    if price is not None:
+        print(f"🟢 使用 Yahoo Finance 抓到價格：{price}")
+        return price
+    price = get_price_from_finmind()
+    if price is not None:
+        print(f"🟢 使用 FinMind 抓到價格：{price}")
+        return price
+    raise Exception("❌ Yahoo + FinMind 都無法取得股價")
+
+# ------------------------------
+# Cloudflare KV 用戶取得
+# ------------------------------
+def get_all_user_ids_from_cloudflare():
+    if not all([CF_ACCOUNT_ID, CF_API_TOKEN, CF_KV_NAMESPACE_ID]):
+        return []
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
+    headers = {"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"}
+    user_ids = []
+    cursor = None
+    while True:
+        params = {'limit': 1000}
+        if cursor: params['cursor'] = cursor
         try:
-            # 鄉鎮預報 API 請求
-            url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{item['id']}?Authorization={CWA_KEY}&format=JSON&locationName={item['name']}&elementName=Wx,MinT,MaxT,PoP12h"
-            r = requests.get(url, timeout=15)
+            r = requests.get(url, headers=headers, params=params, timeout=10)
             data = r.json()
-            
-            # --- 結構自動偵測邏輯 ---
-            records = data.get('records', {})
-            # 如果有 locations 則深入一層，否則直接找 location
-            locs_container = records.get('locations', [{}])[0]
-            loc_list = locs_container.get('location', records.get('location', []))
-            
-            if loc_list:
-                target_loc = loc_list[0]
-                e_map = {}
-                for elem in target_loc.get('weatherElement', []):
-                    name = elem.get('elementName')
-                    # 遍歷時段直到找到有效數值 (非空格或 None)
-                    for t_block in elem.get('time', []):
-                        val = t_block.get('elementValue', [{}])[0].get('value')
-                        if val is not None and str(val).strip():
-                            e_map[name] = val
-                            break
-                
-                wx = e_map.get('Wx', '未知')
-                mint = e_map.get('MinT', '--')
-                maxt = e_map.get('MaxT', '--')
-                pop = e_map.get('PoP12h', '0')
-                results.append(f"📍 {item['name']} {mint}~{maxt}° {wx} (降雨{pop}%)")
-            else:
-                results.append(f"📍 {item['name']} 讀取不到資料")
-        except Exception:
-            results.append(f"📍 {item['name']} 更新中")
-            
-    return "\n".join(results)
+            if not data.get('success'): break
+            user_ids.extend([item['name'] for item in data['result']])
+            cursor = data['result_info'].get('cursor')
+            if not cursor: break
+        except: break
+    return user_ids
 
+# ------------------------------
+# LINE 群發推播
+# ------------------------------
+def send_line_message_to_all(user_ids, message):
+    if not user_ids or not message: return
+    url = "https://api.line.me/v2/bot/message/multicast"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}"}
+    for i in range(0, len(user_ids), 500):
+        batch_ids = user_ids[i:i + 500]
+        body = {"to": batch_ids, "messages": [{"type": "text", "text": message}]}
+        requests.post(url, headers=headers, json=body, timeout=10)
+
+# ------------------------------
+# 主程式邏輯整合
+# ------------------------------
 def main():
-    # 1. 取得用戶 (Cloudflare KV)
-    users = []
-    try:
-        kv_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
-        r = requests.get(kv_url, headers={"Authorization": f"Bearer {CF_API_TOKEN}"}, timeout=10)
-        users = [k['name'] for k in r.json().get('result', [])]
-        print(f"✅ 成功讀取用戶數: {len(users)}")
-    except: return
+    all_users = get_all_user_ids_from_cloudflare()
+    if not all_users:
+        print("❌ 無法取得用戶 ID，結束運行。")
+        return
 
-    # 2. 抓取股價
-    try:
-        p_res = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/2330.TW", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        price = p_res.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
-        price_info = f"📈 TSMC 目前股價：{price} 元"
-    except: price_info = "📈 股價資訊更新中"
+    # 取得台灣當前小時
+    tw_time = datetime.utcnow() + timedelta(hours=8)
+    tw_hour = tw_time.hour
 
-    # 3. 組合訊息
-    now = datetime.utcnow() + timedelta(hours=8)
-    weather_report = get_precise_weather()
-    final_msg = f"🌤 一分鐘報天氣 {now.strftime('%m/%d')} 🌤\n\n{weather_report}\n\n{price_info}\n\n天氣變化多留意，祝吉祥如意，平安幸福。"
+    # --- 早上 7 點：推播氣象 ---
+    if tw_hour == 7:
+        weather_msg = get_weather_report()
+        send_line_message_to_all(all_users, weather_msg)
+    
+    # --- 下午 1 點到 3 點：執行原有的台積電監控 ---
+    elif 13 <= tw_hour <= 15:
+        price = get_tsmc_price()
+        if price >= TSMC_TARGET_PRICE:
+            msg = f"📈 台積電股價已達 {price} 元！\n（提醒門檻：{TSMC_TARGET_PRICE}）"
+            send_line_message_to_all(all_users, msg)
+        
+        daily_msg = f"📢 tsmc 今日收盤價：{price} 元"
+        send_line_message_to_all(all_users, daily_msg)
 
-    # 4. 發送
-    if users:
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
-        payload = {"to": users, "messages": [{"type": "text", "text": final_msg}]}
-        requests.post("https://api.line.me/v2/bot/message/multicast", headers=headers, json=payload, timeout=10)
+    # --- 非定時手動觸發：同時執行氣象與股價 (供測試) ---
+    else:
+        weather_msg = get_weather_report()
+        send_line_message_to_all(all_users, weather_msg)
+        try:
+            price = get_tsmc_price()
+            send_line_message_to_all(all_users, f"📢 測試抓取股價成功：{price} 元")
+        except:
+            print("測試股價抓取失敗。")
 
 if __name__ == "__main__":
     main()
