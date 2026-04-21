@@ -45,7 +45,7 @@ def get_weather_report():
         msg += f"{weather_results.get('臺北市', '📍 臺北市 資料讀取中')}\n"
         msg += f"{weather_results.get('新北市', '📍 新北市 資料讀取中')}\n"
         msg += f"{weather_results.get('宜蘭縣', '📍 宜蘭縣 資料讀取中')}\n\n"
-        msg += "飯後起身走走能穩定血糖，每天深蹲有益健康，有閒錢記得買tsmc，2500馬上會來的! 祝福您吉祥如意闔家平安幸福永相隨。"
+        msg += "每天深蹲有益健康，肌肉是身體最大的葡萄糖使用器官，也是最大的血糖代謝器官，占比高達80%呢!!! 有錢記得要買tsmc，2500馬上會來的! 祝福您吉祥如意闔家平安幸福永相隨。"
         return msg
     except Exception as e:
         return f"❌ 氣象解析失敗: {str(e)}"
