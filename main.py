@@ -13,7 +13,7 @@ CWA_API_KEY = os.environ.get("CWA_API_KEY")
 TSMC_TARGET_PRICE = 2500  # 您要通知的價格
 
 # ------------------------------
-# 氣象預報函式 (使用最穩定的 F-C0032-001)
+# 氣象預報函式
 # ------------------------------
 def get_weather_report():
     if not CWA_API_KEY:
@@ -51,7 +51,7 @@ def get_weather_report():
         return f"❌ 氣象解析失敗: {str(e)}"
 
 # ------------------------------
-# 台積電股價抓取 (保留您原本的雙來源邏輯)
+# 台積電股價抓取
 # ------------------------------
 def get_price_from_yahoo():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW"
@@ -135,17 +135,36 @@ def main():
         weather_msg = get_weather_report()
         send_line_message_to_all(all_users, weather_msg)
     
-    # --- 下午 1 點到 3 點：執行原有的台積電監控 ---
+    # --- 下午 1 點到 3 點：執行台積電監控 (含 RSI 新邏輯) ---
     elif 13 <= tw_hour <= 15:
         price = get_tsmc_price()
+        
+        # --- [新增] 最小化 RSI 計算邏輯 ---
+        rsi_val = None
+        try:
+            # 抓取過去一個月的歷史數據算 RSI
+            r_rsi = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/2330.TW?range=1mo&interval=1d", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            c = [x for x in r_rsi.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if x is not None]
+            if len(c) > 14:
+                d = [c[i] - c[i-1] for i in range(1, len(c))]
+                g = sum([x for x in d[-14:] if x > 0]) / 14
+                l = sum([-x for x in d[-14:] if x < 0]) / 14
+                rsi_val = round(100 - (100 / (1 + (g / l))), 2) if l != 0 else 100
+        except:
+            pass # 若抓取失敗則 rsi_val 維持 None，不影響主訊息發送
+        
+        rsi_str = f" (RSI: {rsi_val})" if rsi_val else ""
+        overheat_note = "\n🔥 目前 RSI 過熱，請小心！" if (rsi_val and rsi_val > 75) else ""
+        # -------------------------------
+
         if price >= TSMC_TARGET_PRICE:
-            msg = f"📈 台積電股價已達 {price} 元！\n（提醒門檻：{TSMC_TARGET_PRICE}）"
+            msg = f"📈 台積電股價已達 {price} 元！{rsi_str}\n（提醒門檻：{TSMC_TARGET_PRICE}）{overheat_note}"
             send_line_message_to_all(all_users, msg)
         
-        daily_msg = f"📢 tsmc 今日收盤價：{price} 元"
+        daily_msg = f"📢 tsmc 今日收盤價：{price} 元{rsi_str}{overheat_note}"
         send_line_message_to_all(all_users, daily_msg)
 
-    # --- 非定時手動觸發：同時執行氣象與股價 (供測試) ---
+    # --- 非定時手動觸發 ---
     else:
         weather_msg = get_weather_report()
         send_line_message_to_all(all_users, weather_msg)
