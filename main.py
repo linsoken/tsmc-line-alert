@@ -135,33 +135,46 @@ def main():
         weather_msg = get_weather_report()
         send_line_message_to_all(all_users, weather_msg)
     
-    # --- 下午 1 點到 3 點：執行台積電監控 (含 RSI 新邏輯) ---
+    # --- 下午 1 點到 3 點：執行台積電監控 (含 RSI 與 乖離率) ---
     elif 13 <= tw_hour <= 15:
         price = get_tsmc_price()
         
-        # --- [新增] 最小化 RSI 計算邏輯 ---
+        # --- [新增] 最小化 RSI 與 乖離率 計算邏輯 ---
         rsi_val = None
+        bias_val = None
         try:
-            # 抓取過去一個月的歷史數據算 RSI
-            r_rsi = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/2330.TW?range=1mo&interval=1d", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-            c = [x for x in r_rsi.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if x is not None]
+            # 抓取過去一個月的歷史數據
+            r_hist = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/2330.TW?range=1mo&interval=1d", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            c = [x for x in r_hist.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if x is not None]
+            
+            # 1. 計算 RSI (14日)
             if len(c) > 14:
                 d = [c[i] - c[i-1] for i in range(1, len(c))]
                 g = sum([x for x in d[-14:] if x > 0]) / 14
                 l = sum([-x for x in d[-14:] if x < 0]) / 14
                 rsi_val = round(100 - (100 / (1 + (g / l))), 2) if l != 0 else 100
+            
+            # 2. 計算 20日乖離率 (BIAS)
+            if len(c) >= 20:
+                ma20 = sum(c[-20:]) / 20
+                bias_val = round(((price - ma20) / ma20) * 100, 2)
         except:
-            pass # 若抓取失敗則 rsi_val 維持 None，不影響主訊息發送
+            pass 
         
-        rsi_str = f" (RSI: {rsi_val})" if rsi_val else ""
-        overheat_note = "\n🔥 目前 RSI 過熱，請小心！" if (rsi_val and rsi_val > 75) else ""
+        # 組合指標訊息字串
+        indicators = []
+        if rsi_val: indicators.append(f"RSI: {rsi_val}")
+        if bias_val: indicators.append(f"乖離率: {bias_val}%")
+        
+        indicator_str = f" ({'、'.join(indicators)})" if indicators else ""
+        overheat_note = "\n目前指標過熱！" if (rsi_val and rsi_val > 75) or (bias_val and bias_val > 10) else ""
         # -------------------------------
 
         if price >= TSMC_TARGET_PRICE:
-            msg = f"📈 台積電股價已達 {price} 元！{rsi_str}\n（提醒門檻：{TSMC_TARGET_PRICE}）{overheat_note}"
+            msg = f"📈 台積電股價已達 {price} 元！{indicator_str}\n（提醒門檻：{TSMC_TARGET_PRICE}）{overheat_note}"
             send_line_message_to_all(all_users, msg)
         
-        daily_msg = f"📢 tsmc 今日收盤價：{price} 元{rsi_str}{overheat_note}"
+        daily_msg = f"📢 tsmc 今日收盤價：{price} 元{indicator_str}{overheat_note}"
         send_line_message_to_all(all_users, daily_msg)
 
     # --- 非定時手動觸發 ---
