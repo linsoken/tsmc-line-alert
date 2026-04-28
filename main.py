@@ -51,11 +51,11 @@ def get_weather_report():
         return f"❌ 氣象解析失敗: {str(e)}"
 
 # ------------------------------
-# 台積電股價抓取
+# 台積電股價抓取 (優化 Headers)
 # ------------------------------
 def get_price_from_yahoo():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         r = requests.get(url, headers=headers, timeout=10)
         if r.status_code != 200: return None
@@ -73,21 +73,16 @@ def get_price_from_finmind():
 
 def get_tsmc_price():
     price = get_price_from_yahoo()
-    if price is not None:
-        print(f"🟢 使用 Yahoo Finance 抓到價格：{price}")
-        return price
+    if price is not None: return price
     price = get_price_from_finmind()
-    if price is not None:
-        print(f"🟢 使用 FinMind 抓到價格：{price}")
-        return price
-    raise Exception("❌ Yahoo + FinMind 都無法取得股價")
+    if price is not None: return price
+    raise Exception("❌ 無法取得股價")
 
 # ------------------------------
-# Cloudflare KV 用戶取得
+# Cloudflare KV 與 LINE 推播
 # ------------------------------
 def get_all_user_ids_from_cloudflare():
-    if not all([CF_ACCOUNT_ID, CF_API_TOKEN, CF_KV_NAMESPACE_ID]):
-        return []
+    if not all([CF_ACCOUNT_ID, CF_API_TOKEN, CF_KV_NAMESPACE_ID]): return []
     url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/keys"
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"}
     user_ids = []
@@ -105,9 +100,6 @@ def get_all_user_ids_from_cloudflare():
         except: break
     return user_ids
 
-# ------------------------------
-# LINE 群發推播
-# ------------------------------
 def send_line_message_to_all(user_ids, message):
     if not user_ids or not message: return
     url = "https://api.line.me/v2/bot/message/multicast"
@@ -118,7 +110,7 @@ def send_line_message_to_all(user_ids, message):
         requests.post(url, headers=headers, json=body, timeout=10)
 
 # ------------------------------
-# 主程式邏輯整合
+# 主程式
 # ------------------------------
 def main():
     all_users = get_all_user_ids_from_cloudflare()
@@ -126,7 +118,6 @@ def main():
         print("❌ 無法取得用戶 ID，結束運行。")
         return
 
-    # 取得台灣當前小時
     tw_time = datetime.utcnow() + timedelta(hours=8)
     tw_hour = tw_time.hour
 
@@ -135,49 +126,52 @@ def main():
         weather_msg = get_weather_report()
         send_line_message_to_all(all_users, weather_msg)
     
-    # --- 下午 1 點到 3 點：執行台積電監控 (含 RSI 與 乖離率) ---
-    elif 13 <= tw_hour <= 15:
-        price = get_tsmc_price()
-        
-        # --- [新增] 最小化 RSI 與 乖離率 計算邏輯 ---
-        rsi_val = None
-        bias_val = None
+    # --- 下午 1 點到 5 點（含 16:xx 延遲觸發）：執行台積電監控 ---
+    elif 13 <= tw_hour <= 17:
         try:
-            # 抓取過去一個月的歷史數據
-            r_hist = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/2330.TW?range=1mo&interval=1d", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-            c = [x for x in r_hist.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if x is not None]
+            price = get_tsmc_price()
+            rsi_val = None
+            bias_val = None
             
-            # 1. 計算 RSI (14日)
-            if len(c) > 14:
-                d = [c[i] - c[i-1] for i in range(1, len(c))]
-                g = sum([x for x in d[-14:] if x > 0]) / 14
-                l = sum([-x for x in d[-14:] if x < 0]) / 14
-                rsi_val = round(100 - (100 / (1 + (g / l))), 2) if l != 0 else 100
+            # 計算指標
+            try:
+                h_url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW?range=1mo&interval=1d"
+                r_hist = requests.get(h_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+                c = [x for x in r_hist.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if x is not None]
+                
+                if len(c) > 14:
+                    d = [c[i] - c[i-1] for i in range(1, len(c))]
+                    g = sum([x for x in d[-14:] if x > 0]) / 14
+                    l = sum([-x for x in d[-14:] if x < 0]) / 14
+                    rsi_val = round(100 - (100 / (1 + (g / l))), 2) if l != 0 else 100
+                
+                if len(c) >= 20:
+                    ma20 = sum(c[-20:]) / 20
+                    bias_val = round(((price - ma20) / ma20) * 100, 2)
+            except:
+                pass 
             
-            # 2. 計算 20日乖離率 (BIAS)
-            if len(c) >= 20:
-                ma20 = sum(c[-20:]) / 20
-                bias_val = round(((price - ma20) / ma20) * 100, 2)
-        except:
-            pass 
-        
-        # 組合指標訊息字串
-        indicators = []
-        if rsi_val: indicators.append(f"RSI: {rsi_val}")
-        if bias_val: indicators.append(f"乖離率: {bias_val}%")
-        
-        indicator_str = f" ({'、'.join(indicators)})" if indicators else ""
-        overheat_note = "\n目前指標過熱！" if (rsi_val and rsi_val > 75) or (bias_val and bias_val > 10) else ""
-        # -------------------------------
+            # 組合訊息
+            indicators = []
+            if rsi_val is not None: indicators.append(f"RSI: {rsi_val}")
+            if bias_val is not None: indicators.append(f"乖離率: {bias_val}%")
+            
+            indicator_str = f" ({'、'.join(indicators)})" if indicators else ""
+            overheat_note = "\n目前指標過熱！" if (rsi_val and rsi_val > 75) or (bias_val and bias_val > 10) else ""
 
-        if price >= TSMC_TARGET_PRICE:
-            msg = f"📈 台積電股價已達 {price} 元！{indicator_str}\n（提醒門檻：{TSMC_TARGET_PRICE}）{overheat_note}"
-            send_line_message_to_all(all_users, msg)
-        
-        daily_msg = f"📢 tsmc 今日收盤價：{price} 元{indicator_str}{overheat_note}"
-        send_line_message_to_all(all_users, daily_msg)
+            # 達標通知
+            if price >= TSMC_TARGET_PRICE:
+                msg = f"📈 台積電股價已達 {price} 元！{indicator_str}\n（提醒門檻：{TSMC_TARGET_PRICE}）{overheat_note}"
+                send_line_message_to_all(all_users, msg)
+            
+            # 每日收盤行情
+            daily_msg = f"📢 tsmc 今日收盤價：{price} 元{indicator_str}{overheat_note}"
+            send_line_message_to_all(all_users, daily_msg)
+            
+        except Exception as e:
+            print(f"股市監控失敗: {e}")
 
-    # --- 非定時手動觸發 ---
+    # --- 其他時間（手動測試） ---
     else:
         weather_msg = get_weather_report()
         send_line_message_to_all(all_users, weather_msg)
