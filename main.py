@@ -153,8 +153,8 @@ def main():
             
             # 組合訊息
             indicators = []
-            if rsi_val is not None: indicators.append(f"RSI: {rsi_val}")
-            if bias_val is not None: indicators.append(f"乖離率: {bias_val}%")
+            if rsi_val is not None: indicators.append(f"14日RSI: {rsi_val}")
+            if bias_val is not None: indicators.append(f"20日乖離率: {bias_val}%")
             
             indicator_str = f" ({'、'.join(indicators)})" if indicators else ""
             overheat_note = "\n目前指標過熱！" if (rsi_val and rsi_val > 75) or (bias_val and bias_val > 10) else ""
