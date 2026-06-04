@@ -121,8 +121,8 @@ def main():
     tw_time = datetime.utcnow() + timedelta(hours=8)
     tw_hour = tw_time.hour
 
-    # --- 早上 7 點：推播氣象 ---
-    if tw_hour == 7:
+    # --- 早上 7 點（或排程微小延遲的 8 點）：只發送一次氣象，絕不重疊 ---
+    if tw_hour == 7 or tw_hour == 8:
         weather_msg = get_weather_report()
         send_line_message_to_all(all_users, weather_msg)
     
@@ -171,15 +171,10 @@ def main():
         except Exception as e:
             print(f"股市監控失敗: {e}")
 
-    # --- 其他時間（手動測試） ---
+    # --- 其他時間（例如深夜手動按下 Run 測試）：只單純推播天氣，絕不推送股票測試字串 ---
     else:
         weather_msg = get_weather_report()
         send_line_message_to_all(all_users, weather_msg)
-        try:
-            price = get_tsmc_price()
-            send_line_message_to_all(all_users, f"📢 測試抓取股價成功：{price} 元")
-        except:
-            print("測試股價抓取失敗。")
 
 if __name__ == "__main__":
     main()
