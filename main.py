@@ -55,7 +55,11 @@ def get_weather_report():
 # ------------------------------
 def get_price_from_yahoo():
     url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    # 強化 Headers 模擬，避免被 Yahoo 拒絕連線
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/json"
+    }
     try:
         r = requests.get(url, headers=headers, timeout=10)
         if r.status_code != 200: return None
@@ -125,9 +129,9 @@ def main():
     if tw_hour == 7 or tw_hour == 8:
         weather_msg = get_weather_report()
         send_line_message_to_all(all_users, weather_msg)
-    
-    # --- 下午 1 點到 5 點（含 16:xx 延遲觸發）：執行台積電監控 ---
-    elif 13 <= tw_hour <= 17:
+        
+    # --- 下午 1 點到 6 點（13:00 ~ 18:59，多加一小時對抗排程延遲）：執行台積電監控 ---
+    elif 13 <= tw_hour <= 18:
         try:
             price = get_tsmc_price()
             rsi_val = None
@@ -136,7 +140,9 @@ def main():
             # 計算指標
             try:
                 h_url = "https://query1.finance.yahoo.com/v8/finance/chart/2330.TW?range=1mo&interval=1d"
-                r_hist = requests.get(h_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+                # 歷史資料同步加入強化 Headers 避免阻擋
+                h_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                r_hist = requests.get(h_url, headers=h_headers, timeout=10)
                 c = [x for x in r_hist.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if x is not None]
                 
                 if len(c) > 14:
