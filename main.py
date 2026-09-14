@@ -18,15 +18,24 @@ TSMC_TARGET_PRICE = 2500  # 您要通知的價格
 # 氣象預報函式
 # ------------------------------
 def get_weather_report():
+    """
+    使用中央氣象署 F-D0047 鄉鎮天氣預報：
+    - F-D0047-061：臺北市
+    - F-D0047-069：新北市
+
+    顯示：
+    北投區、萬華區、淡水區、信義區
+    今日最低溫~最高溫、目前天氣、目前降雨機率
+    """
 
     if not CWA_API_KEY:
         return "⚠️ 缺少 CWA_API_KEY，無法取得氣象資訊。"
 
-    # --------------------------------------------------
-    # 要查詢的行政區
-    # 臺北市：北投、萬華、信義
-    # 新北市：淡水
-    # --------------------------------------------------
+    weather_datasets = [
+        "F-D0047-061",  # 臺北市
+        "F-D0047-069"   # 新北市
+    ]
+
     target_districts = [
         "北投區",
         "萬華區",
@@ -34,16 +43,7 @@ def get_weather_report():
         "信義區"
     ]
 
-    # --------------------------------------------------
-    # 資料集
-    # --------------------------------------------------
-    weather_datasets = {
-        "F-D0047-061": ["北投區", "萬華區", "信義區"],
-        "F-D0047-069": ["淡水區"]
-    }
-
     try:
-
         # --------------------------------------------------
         # 台灣時間
         # --------------------------------------------------
@@ -63,290 +63,199 @@ def get_weather_report():
             f"%m/%d ({week_list[tw_time.weekday()]})"
         )
 
-        # ==================================================
-        # JSON 大小寫不敏感的工具
-        # ==================================================
+        today_str = tw_time.strftime("%Y-%m-%d")
 
-        def get_key_ci(obj, key_names, default=None):
-            """
-            不管 API 回傳：
-            LocationName
-            locationName
-            LOCATIONNAME
-
-            都可以找到。
-            """
-            if not isinstance(obj, dict):
-                return default
-
-            wanted = {
-                str(x).replace("_", "").lower()
-                for x in key_names
-            }
-
-            for key, value in obj.items():
-                normalized = str(key).replace("_", "").lower()
-
-                if normalized in wanted:
-                    return value
-
-            return default
-
-
-        # ==================================================
-        # 時間解析
-        # ==================================================
-
-        def parse_time(value):
-
-            if not value:
+        # --------------------------------------------------
+        # 大小寫不敏感取值
+        # --------------------------------------------------
+        def get_value_ci(data, *keys):
+            if not isinstance(data, dict):
                 return None
 
-            try:
-                value = str(value)
+            for key in keys:
+                if key in data:
+                    return data[key]
 
-                dt = datetime.fromisoformat(
-                    value.replace("Z", "+00:00")
-                )
-
-                # 轉成台灣時間的 naive datetime
-                if dt.tzinfo is not None:
-                    dt = dt.astimezone().replace(tzinfo=None)
-
-                return dt
-
-            except:
-
-                # 第二種格式
-                try:
-                    return datetime.strptime(
-                        str(value),
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                except:
-                    return None
-
-
-        # ==================================================
-        # 遞迴搜尋所有行政區 Location
-        #
-        # 不再假設一定是：
-        # records -> Locations -> Location
-        #
-        # 只要 JSON 裡有 LocationName，就可以找到。
-        # ==================================================
-
-        def find_all_locations(obj):
-
-            result = []
-
-            if isinstance(obj, dict):
-
-                location_name = get_key_ci(
-                    obj,
-                    [
-                        "LocationName",
-                        "locationName"
-                    ]
-                )
-
-                weather_elements = get_key_ci(
-                    obj,
-                    [
-                        "WeatherElement",
-                        "weatherElement"
-                    ]
-                )
-
-                # 必須同時有行政區名稱與天氣資料
-                if (
-                    location_name
-                    and isinstance(weather_elements, list)
-                ):
-                    result.append(obj)
-
-                # 繼續往下找
-                for value in obj.values():
-
-                    result.extend(
-                        find_all_locations(value)
-                    )
-
-            elif isinstance(obj, list):
-
-                for item in obj:
-                    result.extend(
-                        find_all_locations(item)
-                    )
-
-            return result
-
-
-        # ==================================================
-        # 找 WeatherElement
-        # ==================================================
-
-        def get_weather_elements(location):
-
-            elements = get_key_ci(
-                location,
-                [
-                    "WeatherElement",
-                    "weatherElement"
-                ],
-                []
-            )
-
-            if isinstance(elements, list):
-                return elements
-
-            return []
-
-
-        # ==================================================
-        # 找指定 Element
-        # ==================================================
-
-        def find_element(elements, names):
-
-            wanted = {
-                str(x).replace("_", "").lower()
-                for x in names
+            lower_map = {
+                str(k).lower(): v
+                for k, v in data.items()
             }
 
-            for element in elements:
-
-                if not isinstance(element, dict):
-                    continue
-
-                element_name = get_key_ci(
-                    element,
-                    [
-                        "ElementName",
-                        "elementName"
-                    ],
-                    ""
-                )
-
-                normalized = str(
-                    element_name
-                ).replace("_", "").lower()
-
-                if normalized in wanted:
-                    return element
+            for key in keys:
+                if str(key).lower() in lower_map:
+                    return lower_map[str(key).lower()]
 
             return None
 
-
-        # ==================================================
-        # 取得 Time
-        # ==================================================
-
-        def get_times(element):
-
-            if not element:
-                return []
-
-            times = get_key_ci(
-                element,
-                [
-                    "Time",
-                    "time"
-                ],
-                []
-            )
-
-            if isinstance(times, list):
-                return times
-
-            return []
-
-
-        # ==================================================
-        # 取得 ElementValue
-        # ==================================================
-
+        # --------------------------------------------------
+        # CWA JSON 的 elementValue 是「陣列」
+        #
+        # 實際格式：
+        # "elementValue": [
+        #     {"value": "28"}
+        # ]
+        #
+        # 這是前一版讀不到溫度、天氣、降雨機率的主要原因。
+        # --------------------------------------------------
         def get_element_value(item):
-
-            if not isinstance(item, dict):
-                return {}
-
-            value = get_key_ci(
+            value = get_value_ci(
                 item,
-                [
-                    "ElementValue",
-                    "elementValue"
-                ],
-                {}
+                "ElementValue",
+                "elementValue"
             )
+
+            if isinstance(value, list):
+                if not value:
+                    return {}
+
+                first = value[0]
+
+                if isinstance(first, dict):
+                    return first
+
+                return {"value": first}
 
             if isinstance(value, dict):
                 return value
 
-            return {}
+            if value is None:
+                return {}
 
+            return {"value": value}
 
-        # ==================================================
-        # 找目前時段
-        # ==================================================
+        # --------------------------------------------------
+        # 時間解析
+        # --------------------------------------------------
+        def parse_time(value):
+            if not value:
+                return None
 
+            try:
+                text = str(value).strip()
+
+                # 例如：
+                # 2026-09-14T06:00:00+08:00
+                # 2026-09-14T06:00:00
+                if text.endswith("Z"):
+                    text = text[:-1] + "+00:00"
+
+                dt = datetime.fromisoformat(text)
+
+                # CWA 鄉鎮預報通常就是 +08:00。
+                # 如果沒有時區，直接視為台灣時間。
+                if dt.tzinfo is None:
+                    return dt
+
+                # 將 UTC / 其他時區轉成台灣時間。
+                # 不額外 import timezone，直接以 UTC offset 計算。
+                utc_dt = dt.astimezone(
+                    __import__("datetime").timezone.utc
+                )
+
+                tw_dt = utc_dt + timedelta(hours=8)
+
+                return tw_dt.replace(tzinfo=None)
+
+            except Exception:
+                return None
+
+        # --------------------------------------------------
+        # 取得 WeatherElement
+        # --------------------------------------------------
+        def get_weather_elements(location):
+            elements = get_value_ci(
+                location,
+                "weatherElement",
+                "WeatherElement"
+            )
+
+            return elements if isinstance(elements, list) else []
+
+        # --------------------------------------------------
+        # 取得 ElementName
+        # --------------------------------------------------
+        def get_element_name(element):
+            return get_value_ci(
+                element,
+                "elementName",
+                "ElementName"
+            ) or ""
+
+        # --------------------------------------------------
+        # 尋找指定的 WeatherElement
+        # --------------------------------------------------
+        def find_element(elements, names):
+            wanted = {
+                str(name).lower()
+                for name in names
+            }
+
+            for element in elements:
+                name = str(
+                    get_element_name(element)
+                ).lower()
+
+                if name in wanted:
+                    return element
+
+            return None
+
+        # --------------------------------------------------
+        # 取得 time 陣列
+        # --------------------------------------------------
+        def get_times(element):
+            times = get_value_ci(
+                element,
+                "time",
+                "Time"
+            )
+
+            return times if isinstance(times, list) else []
+
+        # --------------------------------------------------
+        # 找目前有效的時間區間
+        # --------------------------------------------------
         def find_current_time_data(times):
-
             if not times:
                 return None
 
-            # ----------------------------------------------
-            # 第一優先：
-            # StartTime <= 現在 < EndTime
-            # ----------------------------------------------
-
+            # 第一優先：StartTime <= 現在 < EndTime
             for item in times:
-
-                if not isinstance(item, dict):
-                    continue
-
                 start = parse_time(
-                    get_key_ci(
+                    get_value_ci(
                         item,
-                        ["StartTime", "startTime"]
+                        "startTime",
+                        "StartTime"
                     )
                 )
 
                 end = parse_time(
-                    get_key_ci(
+                    get_value_ci(
                         item,
-                        ["EndTime", "endTime"]
+                        "endTime",
+                        "EndTime"
                     )
                 )
 
                 if start and end:
-
                     if start <= tw_time < end:
                         return item
 
-            # ----------------------------------------------
-            # 第二優先：
-            # DataTime <= 現在
-            # 取最新一筆
-            # ----------------------------------------------
-
+            # 第二優先：DataTime <= 現在，
+            # 取最新的一筆
             latest = None
             latest_time = None
 
             for item in times:
-
-                if not isinstance(item, dict):
-                    continue
-
                 data_time = parse_time(
-                    get_key_ci(
+                    get_value_ci(
                         item,
-                        ["DataTime", "dataTime"]
+                        "dataTime",
+                        "DataTime"
                     )
                 )
 
                 if data_time and data_time <= tw_time:
-
                     if (
                         latest_time is None
                         or data_time > latest_time
@@ -354,61 +263,63 @@ def get_weather_report():
                         latest = item
                         latest_time = data_time
 
-            if latest:
+            if latest is not None:
                 return latest
 
-            # ----------------------------------------------
-            # 第三優先：
-            # 找下一個即將開始的時段
-            # ----------------------------------------------
-
-            future_item = None
-            future_time = None
-
-            for item in times:
-
-                if not isinstance(item, dict):
-                    continue
-
-                start = parse_time(
-                    get_key_ci(
-                        item,
-                        ["StartTime", "startTime"]
-                    )
-                )
-
-                if start and start > tw_time:
-
-                    if (
-                        future_time is None
-                        or start < future_time
-                    ):
-                        future_item = item
-                        future_time = start
-
-            if future_item:
-                return future_item
-
-            # ----------------------------------------------
             # 最後使用第一筆
-            # ----------------------------------------------
-
             return times[0]
 
+        # --------------------------------------------------
+        # 從 elementValue 取真正的 value
+        # --------------------------------------------------
+        def get_real_value(item):
+            value = get_element_value(item)
 
-        # ==================================================
-        # 找今天的最高/最低溫
-        # ==================================================
+            # CWA JSON 最常見：
+            # {"value": "28"}
+            result = get_value_ci(
+                value,
+                "value",
+                "Value"
+            )
 
-        def get_today_temperature(
+            if result is not None:
+                return result
+
+            # 某些舊/不同格式可能直接把欄位名稱放裡面
+            for key in [
+                "WeatherDescription",
+                "Weather",
+                "Wx",
+                "ProbabilityOfPrecipitation",
+                "PoP",
+                "PoP6h",
+                "MinTemperature",
+                "MaxTemperature",
+                "MinT",
+                "MaxT"
+            ]:
+                result = get_value_ci(
+                    value,
+                    key
+                )
+
+                if result is not None:
+                    return result
+
+            return None
+
+        # --------------------------------------------------
+        # 取得指定日期的最高/最低溫
+        # --------------------------------------------------
+        def get_daily_temperature(
             elements,
-            temperature_names,
-            value_names
+            element_names,
+            today
         ):
-
             element = find_element(
                 elements,
-                temperature_names
+                element_names
             )
 
             if not element:
@@ -416,406 +327,196 @@ def get_weather_report():
 
             times = get_times(element)
 
-            today = tw_time.strftime("%Y-%m-%d")
-
+            # 先找今天的資料
             for item in times:
-
-                if not isinstance(item, dict):
-                    continue
-
-                start = parse_time(
-                    get_key_ci(
+                check_time = parse_time(
+                    get_value_ci(
                         item,
-                        ["StartTime", "startTime"]
+                        "dataTime",
+                        "DataTime"
                     )
                 )
 
-                data_time = parse_time(
-                    get_key_ci(
-                        item,
-                        ["DataTime", "dataTime"]
-                    )
-                )
-
-                check_time = start or data_time
-
-                if not check_time:
-                    continue
-
-                if check_time.strftime("%Y-%m-%d") != today:
-                    continue
-
-                value = get_element_value(item)
-
-                for value_name in value_names:
-
-                    temperature = get_key_ci(
-                        value,
-                        [value_name]
+                if check_time is None:
+                    check_time = parse_time(
+                        get_value_ci(
+                            item,
+                            "startTime",
+                            "StartTime"
+                        )
                     )
 
-                    if temperature is not None:
-                        return temperature
+                if (
+                    check_time
+                    and check_time.strftime("%Y-%m-%d")
+                    == today
+                ):
+                    value = get_real_value(item)
+
+                    if value is not None and str(value).strip() != "":
+                        return value
+
+            # 如果日期欄位沒有符合，再嘗試第一筆
+            if times:
+                value = get_real_value(times[0])
+
+                if value is not None and str(value).strip() != "":
+                    return value
 
             return None
 
-
-        # ==================================================
-        # 如果 MinT / MaxT 抓不到
-        # 就從「溫度」全天資料中計算
-        # ==================================================
-
-        def get_temperature_range_from_temperature_element(
-            elements
-        ):
-
-            temperature_element = find_element(
-                elements,
-                [
-                    "溫度",
-                    "Temperature",
-                    "T"
-                ]
-            )
-
-            if not temperature_element:
-                return None, None
-
-            times = get_times(
-                temperature_element
-            )
-
-            today = tw_time.strftime("%Y-%m-%d")
-
-            temperatures = []
-
-            for item in times:
-
-                if not isinstance(item, dict):
-                    continue
-
-                start = parse_time(
-                    get_key_ci(
-                        item,
-                        ["StartTime", "startTime"]
-                    )
-                )
-
-                data_time = parse_time(
-                    get_key_ci(
-                        item,
-                        ["DataTime", "dataTime"]
-                    )
-                )
-
-                check_time = start or data_time
-
-                if not check_time:
-                    continue
-
-                if check_time.strftime("%Y-%m-%d") != today:
-                    continue
-
-                value = get_element_value(item)
-
-                temp = get_key_ci(
-                    value,
-                    [
-                        "Temperature",
-                        "temperature",
-                        "T"
-                    ]
-                )
-
-                if temp is None:
-                    continue
-
-                # 可能是數字，也可能是 "28"
-                match = re.search(
-                    r"-?\d+(?:\.\d+)?",
-                    str(temp)
-                )
-
-                if match:
-
-                    temperatures.append(
-                        float(match.group(0))
-                    )
-
-            if not temperatures:
-                return None, None
-
-            return (
-                int(min(temperatures)),
-                int(max(temperatures))
-            )
-
-
-        # ==================================================
-        # 解析天氣描述
-        # ==================================================
-
-        def parse_weather_description(elements):
-
-            weather_desc_element = find_element(
-                elements,
-                [
-                    "天氣預報綜合描述",
-                    "WeatherDescription"
-                ]
-            )
-
-            if not weather_desc_element:
-                return "", None
-
-            times = get_times(
-                weather_desc_element
-            )
-
-            current = find_current_time_data(
-                times
-            )
-
-            if not current:
-                return "", None
-
-            value = get_element_value(
-                current
-            )
-
-            weather_desc = get_key_ci(
-                value,
-                [
-                    "WeatherDescription",
-                    "weatherDescription",
-                    "Description",
-                    "description"
-                ],
-                ""
-            )
-
-            weather_desc = str(
-                weather_desc or ""
-            ).strip()
-
-            if not weather_desc:
-                return "", None
-
-            # ----------------------------------------------
-            # 天氣現象
-            #
-            # 例如：
-            # 陰短暫陣雨。
-            # 降雨機率40%。
-            # ----------------------------------------------
-
-            weather = weather_desc
-
-            if "。" in weather_desc:
-                weather = weather_desc.split(
-                    "。"
-                )[0].strip()
-
-            # ----------------------------------------------
-            # 降雨機率
-            # ----------------------------------------------
-
-            pop = None
-
-            match = re.search(
-                r"降雨機率\s*(\d+)\s*%",
-                weather_desc
-            )
-
-            if match:
-                pop = match.group(1)
-
-            return weather, pop
-
-
-        # ==================================================
+        # --------------------------------------------------
         # 解析單一行政區
-        # ==================================================
-
+        # --------------------------------------------------
         def parse_location(location):
-
-            district = get_key_ci(
+            district = get_value_ci(
                 location,
-                [
-                    "LocationName",
-                    "locationName"
-                ],
-                ""
-            )
+                "locationName",
+                "LocationName"
+            ) or ""
 
             if district not in target_districts:
                 return None
 
-            elements = get_weather_elements(
-                location
-            )
+            elements = get_weather_elements(location)
 
             if not elements:
+                print(
+                    f"CWA 找到 {district}，但沒有 weatherElement"
+                )
                 return None
 
             # ==================================================
-            # 1. 天氣描述
+            # 1. WeatherDescription
             # ==================================================
+            weather_desc = ""
 
-            weather, pop = parse_weather_description(
-                elements
+            weather_desc_element = find_element(
+                elements,
+                [
+                    "WeatherDescription",
+                    "天氣預報綜合描述"
+                ]
             )
 
-            # ==================================================
-            # 2. 如果天氣描述沒有資料
-            #    改抓「天氣現象」
-            # ==================================================
-
-            if not weather:
-
-                weather_element = find_element(
-                    elements,
-                    [
-                        "天氣現象",
-                        "Wx",
-                        "Weather"
-                    ]
+            if weather_desc_element:
+                current = find_current_time_data(
+                    get_times(weather_desc_element)
                 )
 
-                if weather_element:
+                if current:
+                    value = get_real_value(current)
 
-                    current = find_current_time_data(
-                        get_times(
-                            weather_element
-                        )
-                    )
+                    if value is not None:
+                        weather_desc = str(value).strip()
 
-                    if current:
+            # ==================================================
+            # 2. Wx / Weather
+            # ==================================================
+            weather = ""
 
-                        value = get_element_value(
-                            current
-                        )
+            weather_element = find_element(
+                elements,
+                [
+                    "Wx",
+                    "Weather",
+                    "天氣現象"
+                ]
+            )
 
-                        weather = get_key_ci(
-                            value,
-                            [
-                                "Weather",
-                                "weather",
-                                "Wx",
-                                "wx"
-                            ],
-                            ""
-                        )
+            if weather_element:
+                current = find_current_time_data(
+                    get_times(weather_element)
+                )
 
-                        weather = str(
-                            weather or ""
-                        ).strip()
+                if current:
+                    value = get_real_value(current)
+
+                    if value is not None:
+                        weather = str(value).strip()
+
+            # WeatherDescription 通常會包含：
+            # 「陰短暫陣雨。降雨機率40%。溫度攝氏...」
+            #
+            # 使用第一個「。」以前的內容作為簡短天氣。
+            if weather_desc:
+                first_sentence = (
+                    weather_desc
+                    .split("。")[0]
+                    .strip()
+                )
+
+                if first_sentence:
+                    weather = first_sentence
 
             # ==================================================
             # 3. 降雨機率
             # ==================================================
+            pop = None
 
+            if weather_desc:
+                match = re.search(
+                    r"降雨機率\s*(\d+)\s*%",
+                    weather_desc
+                )
+
+                if match:
+                    pop = match.group(1)
+
+            # 如果 WeatherDescription 沒有降雨機率，
+            # 再抓 PoP / PoP6h
             if pop is None:
-
                 pop_element = find_element(
                     elements,
                     [
-                        "12小時降雨機率",
-                        "6小時降雨機率",
-                        "降雨機率",
                         "PoP",
                         "PoP6h",
+                        "12小時降雨機率",
+                        "6小時降雨機率",
                         "ProbabilityOfPrecipitation"
                     ]
                 )
 
                 if pop_element:
-
                     current = find_current_time_data(
-                        get_times(
-                            pop_element
-                        )
+                        get_times(pop_element)
                     )
 
                     if current:
+                        value = get_real_value(current)
 
-                        value = get_element_value(
-                            current
-                        )
-
-                        pop = get_key_ci(
-                            value,
-                            [
-                                "ProbabilityOfPrecipitation",
-                                "PoP",
-                                "PoP6h",
-                                "降雨機率"
-                            ]
-                        )
+                        if value is not None:
+                            pop = str(value).strip()
 
             # ==================================================
-            # 4. 最低溫
+            # 4. 今日最低溫
             # ==================================================
-
-            min_temp = get_today_temperature(
+            min_temp = get_daily_temperature(
                 elements,
                 [
-                    "最低溫度",
                     "MinT",
-                    "MinTemperature"
-                ],
-                [
                     "MinTemperature",
-                    "minTemperature",
-                    "MinT",
-                    "minT",
                     "最低溫度"
-                ]
+                ],
+                today_str
             )
 
             # ==================================================
-            # 5. 最高溫
+            # 5. 今日最高溫
             # ==================================================
-
-            max_temp = get_today_temperature(
+            max_temp = get_daily_temperature(
                 elements,
                 [
-                    "最高溫度",
                     "MaxT",
-                    "MaxTemperature"
-                ],
-                [
                     "MaxTemperature",
-                    "maxTemperature",
-                    "MaxT",
-                    "maxT",
                     "最高溫度"
-                ]
+                ],
+                today_str
             )
 
             # ==================================================
-            # 6. 如果最高/最低溫抓不到
-            #    從「溫度」全天資料計算
+            # 6. 最後整理
             # ==================================================
-
-            if min_temp is None or max_temp is None:
-
-                calc_min, calc_max = (
-                    get_temperature_range_from_temperature_element(
-                        elements
-                    )
-                )
-
-                if min_temp is None:
-                    min_temp = calc_min
-
-                if max_temp is None:
-                    max_temp = calc_max
-
-            # ==================================================
-            # 7. 最後整理
-            # ==================================================
-
             if not weather:
                 weather = "天氣資料讀取中"
 
@@ -828,6 +529,28 @@ def get_weather_report():
             if max_temp is None:
                 max_temp = "?"
 
+            # 數字如果是 28.0，顯示成 28
+            def clean_number(value):
+                if value is None:
+                    return "?"
+
+                text = str(value).strip()
+
+                try:
+                    number = float(text)
+
+                    if number.is_integer():
+                        return str(int(number))
+
+                    return str(number)
+
+                except Exception:
+                    return text
+
+            min_temp = clean_number(min_temp)
+            max_temp = clean_number(max_temp)
+            pop = clean_number(pop)
+
             return (
                 f"📍 {district} "
                 f"{min_temp}~{max_temp}° "
@@ -838,11 +561,9 @@ def get_weather_report():
         # ==================================================
         # 取得兩個城市資料
         # ==================================================
-
         weather_results = {}
 
-        for dataset_id, districts in weather_datasets.items():
-
+        for dataset_id in weather_datasets:
             url = (
                 "https://opendata.cwa.gov.tw/"
                 f"api/v1/rest/datastore/{dataset_id}"
@@ -850,87 +571,114 @@ def get_weather_report():
 
             params = {
                 "Authorization": CWA_API_KEY,
-                "format": "JSON"
+                "format": "JSON",
+
+                # 只要求需要的四個行政區，
+                # 減少 API 回傳資料量。
+                "LocationName": ",".join(
+                    target_districts
+                )
             }
 
-            # --------------------------------------------------
-            # 直接指定需要的行政區
-            # 這樣不用下載整個城市所有資料
-            # --------------------------------------------------
-
-            params["locationName"] = ",".join(
-                districts
-            )
-
             try:
-
                 response = requests.get(
                     url,
                     params=params,
                     timeout=15
                 )
 
-                print(
-                    f"CWA {dataset_id} HTTP "
-                    f"{response.status_code}"
-                )
-
                 if response.status_code != 200:
-
                     print(
                         f"氣象 API {dataset_id} "
                         f"HTTP {response.status_code}"
                     )
-
                     continue
 
                 data = response.json()
 
-                # --------------------------------------------------
-                # 找出 API 實際回傳的所有行政區
-                # --------------------------------------------------
-
-                all_locations = find_all_locations(
-                    data
+                records = data.get(
+                    "records",
+                    {}
                 )
 
-                discovered_names = []
+                # CWA 鄉鎮 JSON 實際主要結構：
+                #
+                # records
+                #   └── locations
+                #         └── location
+                #
+                locations_groups = get_value_ci(
+                    records,
+                    "locations",
+                    "Locations"
+                )
 
-                for location in all_locations:
+                location_list = []
 
-                    name = get_key_ci(
-                        location,
-                        [
-                            "LocationName",
-                            "locationName"
-                        ],
-                        ""
+                if isinstance(
+                    locations_groups,
+                    list
+                ):
+                    for group in locations_groups:
+                        if not isinstance(group, dict):
+                            continue
+
+                        group_locations = get_value_ci(
+                            group,
+                            "location",
+                            "Location"
+                        )
+
+                        if isinstance(
+                            group_locations,
+                            list
+                        ):
+                            location_list.extend(
+                                group_locations
+                            )
+
+                elif isinstance(
+                    locations_groups,
+                    dict
+                ):
+                    group_locations = get_value_ci(
+                        locations_groups,
+                        "location",
+                        "Location"
                     )
 
-                    if name and name not in discovered_names:
-                        discovered_names.append(name)
+                    if isinstance(
+                        group_locations,
+                        list
+                    ):
+                        location_list.extend(
+                            group_locations
+                        )
+
+                # 某些格式直接就是 location 陣列
+                if not location_list:
+                    direct_locations = get_value_ci(
+                        records,
+                        "location",
+                        "Location"
+                    )
+
+                    if isinstance(
+                        direct_locations,
+                        list
+                    ):
+                        location_list = direct_locations
 
                 print(
                     f"CWA {dataset_id} 找到行政區："
-                    f"{discovered_names}"
+                    f"{[get_value_ci(x, 'locationName', 'LocationName') for x in location_list if isinstance(x, dict)]}"
                 )
 
-                # --------------------------------------------------
-                # 解析需要的行政區
-                # --------------------------------------------------
-
-                for location in all_locations:
-
-                    district = get_key_ci(
+                for location in location_list:
+                    if not isinstance(
                         location,
-                        [
-                            "LocationName",
-                            "locationName"
-                        ],
-                        ""
-                    )
-
-                    if district not in districts:
+                        dict
+                    ):
                         continue
 
                     result = parse_location(
@@ -938,13 +686,17 @@ def get_weather_report():
                     )
 
                     if result:
+                        district = get_value_ci(
+                            location,
+                            "locationName",
+                            "LocationName"
+                        )
 
                         weather_results[
                             district
                         ] = result
 
             except Exception as e:
-
                 print(
                     f"氣象資料集 {dataset_id} "
                     f"解析失敗：{e}"
@@ -953,14 +705,12 @@ def get_weather_report():
         # ==================================================
         # 組合 LINE 訊息
         # ==================================================
-
         msg = (
             f"🌤 一分鐘報天氣 "
             f"{date_str} 🌤\n\n"
         )
 
         for district in target_districts:
-
             msg += (
                 weather_results.get(
                     district,
@@ -974,7 +724,6 @@ def get_weather_report():
         # ==================================================
         # 原本訊息完全保留
         # ==================================================
-
         msg += (
             "每天深蹲有益健康，肌肉是身體最大的葡萄糖使用器官，"
             "也是最大的血糖代謝器官，占比高達80%呢! "
@@ -985,7 +734,6 @@ def get_weather_report():
         return msg
 
     except Exception as e:
-
         return f"❌ 氣象解析失敗: {str(e)}"
 
 
@@ -999,6 +747,7 @@ def get_price_from_yahoo():
         "v8/finance/chart/2330.TW"
     )
 
+    # 強化 Headers 模擬，避免被 Yahoo 拒絕連線
     headers = {
         "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1224,7 +973,7 @@ def main():
 
     # --------------------------------------------------
     # 早上 7 點（或排程微小延遲的 8 點）
-    # 只發送一次氣象
+    # 只發送一次氣象，絕不重疊
     # --------------------------------------------------
     if tw_hour == 7 or tw_hour == 8:
 
@@ -1262,6 +1011,7 @@ def main():
                     "range=1mo&interval=1d"
                 )
 
+                # 歷史資料同步加入強化 Headers
                 h_headers = {
                     "User-Agent":
                         "Mozilla/5.0 "
@@ -1420,7 +1170,7 @@ def main():
 
     # --------------------------------------------------
     # 其他時間
-    # 例如深夜手動按下 Run
+    # 例如深夜手動按下 Run 測試
     # 只單純推播天氣
     # --------------------------------------------------
     else:
