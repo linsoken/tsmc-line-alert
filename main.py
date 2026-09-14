@@ -23,20 +23,13 @@ def get_weather_report():
 
     # --------------------------------------------------
     # 臺北市、新北市鄉鎮天氣預報
-    #
-    # 臺北市：
-    # F-D0047-061
-    #
-    # 新北市：
-    # F-D0047-069
     # --------------------------------------------------
-
     weather_datasets = [
         "F-D0047-061",  # 臺北市
         "F-D0047-069"   # 新北市
     ]
 
-    # 需要顯示的行政區
+    # 要顯示的行政區
     target_districts = [
         "北投區",
         "萬華區",
@@ -68,25 +61,30 @@ def get_weather_report():
         # --------------------------------------------------
         # 時間解析
         # --------------------------------------------------
-        def parse_time(time_string):
+        def parse_time(value):
 
-            if not time_string:
+            if not value:
                 return None
 
             try:
 
-                return datetime.fromisoformat(
-                    time_string.replace("Z", "+00:00")
-                ).replace(tzinfo=None)
+                # 例如：
+                # 2026-09-12T06:00:00+08:00
+                dt = datetime.fromisoformat(
+                    value.replace("Z", "+00:00")
+                )
+
+                # 轉成沒有 timezone 的 datetime
+                return dt.replace(tzinfo=None)
 
             except:
 
                 return None
 
         # --------------------------------------------------
-        # 取得指定 Element
+        # 取得指定的 WeatherElement
         # --------------------------------------------------
-        def get_element_times(elements, names):
+        def find_element(elements, names):
 
             for element in elements:
 
@@ -96,25 +94,72 @@ def get_weather_report():
                 )
 
                 if element_name in names:
+                    return element
 
-                    return element.get(
-                        "Time",
-                        []
-                    )
-
-            return []
+            return None
 
         # --------------------------------------------------
-        # 從一個行政區取得天氣
+        # 取得目前時段資料
         # --------------------------------------------------
-        def get_district_weather(location):
+        def find_current_time_data(times):
 
-            district_name = location.get(
+            if not times:
+                return None
+
+            # 第一優先：使用 StartTime / EndTime
+            for item in times:
+
+                start = parse_time(
+                    item.get("StartTime")
+                )
+
+                end = parse_time(
+                    item.get("EndTime")
+                )
+
+                if start and end:
+
+                    if start <= tw_time < end:
+                        return item
+
+            # --------------------------------------------------
+            # 第二種格式：
+            # 有些元素使用 DataTime
+            # --------------------------------------------------
+            for item in times:
+
+                data_time = parse_time(
+                    item.get("DataTime")
+                )
+
+                if data_time:
+
+                    # 找距離現在最近的資料
+                    if data_time <= tw_time:
+
+                        # 先暫存
+                        latest = item
+
+            # 如果有找到 DataTime
+            try:
+                return latest
+            except:
+                pass
+
+            # 最後才使用第一筆
+            return times[0]
+
+        # --------------------------------------------------
+        # 解析一個行政區
+        # --------------------------------------------------
+        def parse_location(location):
+
+            district = location.get(
                 "LocationName",
                 ""
             )
 
-            if district_name not in target_districts:
+            if district not in target_districts:
                 return None
 
             elements = location.get(
@@ -122,42 +167,184 @@ def get_weather_report():
                 []
             )
 
-            # 防止 API 大小寫格式不同
             if not elements:
+                return None
 
-                elements = location.get(
-                    "weatherElement",
+            # ==================================================
+            # 1. 天氣預報綜合描述
+            # ==================================================
+            weather_desc_element = find_element(
+                elements,
+                [
+                    "天氣預報綜合描述",
+                    "WeatherDescription"
+                ]
+            )
+
+            weather_desc = ""
+
+            if weather_desc_element:
+
+                times = weather_desc_element.get(
+                    "Time",
                     []
                 )
 
-            # --------------------------------------------------
-            # 天氣現象
-            # --------------------------------------------------
-            weather_times = get_element_times(
+                current = find_current_time_data(
+                    times
+                )
+
+                if current:
+
+                    value = current.get(
+                        "ElementValue",
+                        {}
+                    )
+
+                    weather_desc = (
+                        value.get(
+                            "WeatherDescription",
+                            ""
+                        )
+                    )
+
+                    # 有些資料可能直接叫 Description
+                    if not weather_desc:
+
+                        weather_desc = (
+                            value.get(
+                                "Description",
+                                ""
+                            )
+                        )
+
+            # ==================================================
+            # 2. 如果沒有綜合描述，
+            #    再嘗試單獨抓 Weather
+            # ==================================================
+            weather = ""
+
+            weather_element = find_element(
                 elements,
                 [
                     "天氣現象",
-                    "Weather",
-                    "Wx"
+                    "Wx",
+                    "Weather"
                 ]
             )
 
-            # --------------------------------------------------
-            # 降雨機率
-            # --------------------------------------------------
-            pop_times = get_element_times(
-                elements,
-                [
-                    "12小時降雨機率",
-                    "ProbabilityOfPrecipitation",
-                    "PoP"
-                ]
-            )
+            if weather_element:
 
-            # --------------------------------------------------
-            # 最低溫
-            # --------------------------------------------------
-            min_temp_times = get_element_times(
+                times = weather_element.get(
+                    "Time",
+                    []
+                )
+
+                current = find_current_time_data(
+                    times
+                )
+
+                if current:
+
+                    value = current.get(
+                        "ElementValue",
+                        {}
+                    )
+
+                    weather = (
+                        value.get("Weather")
+                        or value.get("Wx")
+                        or ""
+                    )
+
+            # ==================================================
+            # 3. 從 WeatherDescription 解析：
+            #
+            # 「陰短暫陣雨。降雨機率40%。」
+            #
+            # 把「陰短暫陣雨」抓出來
+            # ==================================================
+            if weather_desc:
+
+                try:
+
+                    weather = (
+                        weather_desc
+                        .split("。")[0]
+                        .strip()
+                    )
+
+                except:
+
+                    pass
+
+            # ==================================================
+            # 4. 從 WeatherDescription 解析降雨機率
+            # ==================================================
+            pop = None
+
+            if weather_desc:
+
+                import re
+
+                match = re.search(
+                    r"降雨機率\s*(\d+)\s*%",
+                    weather_desc
+                )
+
+                if match:
+
+                    pop = match.group(1)
+
+            # ==================================================
+            # 5. 如果綜合描述沒有抓到降雨機率，
+            #    再抓 PoP / PoP6h
+            # ==================================================
+            if pop is None:
+
+                pop_element = find_element(
+                    elements,
+                    [
+                        "12小時降雨機率",
+                        "6小時降雨機率",
+                        "PoP",
+                        "PoP6h",
+                        "ProbabilityOfPrecipitation"
+                    ]
+                )
+
+                if pop_element:
+
+                    times = pop_element.get(
+                        "Time",
+                        []
+                    )
+
+                    current = find_current_time_data(
+                        times
+                    )
+
+                    if current:
+
+                        value = current.get(
+                            "ElementValue",
+                            {}
+                        )
+
+                        pop = (
+                            value.get(
+                                "ProbabilityOfPrecipitation"
+                            )
+                            or value.get("PoP")
+                            or value.get("PoP6h")
+                        )
+
+            # ==================================================
+            # 6. 最低溫
+            # ==================================================
+            min_temp = None
+
+            min_element = find_element(
                 elements,
                 [
                     "最低溫度",
@@ -166,10 +353,60 @@ def get_weather_report():
                 ]
             )
 
-            # --------------------------------------------------
-            # 最高溫
-            # --------------------------------------------------
-            max_temp_times = get_element_times(
+            if min_element:
+
+                times = min_element.get(
+                    "Time",
+                    []
+                )
+
+                today = tw_time.strftime(
+                    "%Y-%m-%d"
+                )
+
+                for item in times:
+
+                    start = parse_time(
+                        item.get("StartTime")
+                    )
+
+                    data_time = parse_time(
+                        item.get("DataTime")
+                    )
+
+                    check_time = (
+                        start or data_time
+                    )
+
+                    if (
+                        check_time
+                        and
+                        check_time.strftime(
+                            "%Y-%m-%d"
+                        ) == today
+                    ):
+
+                        value = item.get(
+                            "ElementValue",
+                            {}
+                        )
+
+                        min_temp = (
+                            value.get(
+                                "MinTemperature"
+                            )
+                            or value.get("MinT")
+                        )
+
+                        if min_temp is not None:
+                            break
+
+            # ==================================================
+            # 7. 最高溫
+            # ==================================================
+            max_temp = None
+
+            max_element = find_element(
                 elements,
                 [
                     "最高溫度",
@@ -178,216 +415,62 @@ def get_weather_report():
                 ]
             )
 
-            # ==================================================
-            # 找目前時段的天氣
-            # ==================================================
-            current_weather = None
+            if max_element:
 
-            for item in weather_times:
-
-                start_time = parse_time(
-                    item.get("StartTime")
+                times = max_element.get(
+                    "Time",
+                    []
                 )
 
-                end_time = parse_time(
-                    item.get("EndTime")
+                today = tw_time.strftime(
+                    "%Y-%m-%d"
                 )
 
-                if start_time and end_time:
+                for item in times:
 
-                    if start_time <= tw_time <= end_time:
+                    start = parse_time(
+                        item.get("StartTime")
+                    )
+
+                    data_time = parse_time(
+                        item.get("DataTime")
+                    )
+
+                    check_time = (
+                        start or data_time
+                    )
+
+                    if (
+                        check_time
+                        and
+                        check_time.strftime(
+                            "%Y-%m-%d"
+                        ) == today
+                    ):
 
                         value = item.get(
                             "ElementValue",
                             {}
                         )
 
-                        current_weather = (
-                            value.get("Weather")
-                            or value.get("weather")
-                            or value.get("WeatherDescription")
-                        )
-
-                        break
-
-            # 如果沒有找到目前時段
-            # 使用第一筆資料
-            if not current_weather and weather_times:
-
-                value = weather_times[0].get(
-                    "ElementValue",
-                    {}
-                )
-
-                current_weather = (
-                    value.get("Weather")
-                    or value.get("weather")
-                    or value.get("WeatherDescription")
-                )
-
-            # ==================================================
-            # 找目前時段的降雨機率
-            # ==================================================
-            current_pop = None
-
-            for item in pop_times:
-
-                start_time = parse_time(
-                    item.get("StartTime")
-                )
-
-                end_time = parse_time(
-                    item.get("EndTime")
-                )
-
-                if start_time and end_time:
-
-                    if start_time <= tw_time <= end_time:
-
-                        value = item.get(
-                            "ElementValue",
-                            {}
-                        )
-
-                        current_pop = (
+                        max_temp = (
                             value.get(
-                                "ProbabilityOfPrecipitation"
+                                "MaxTemperature"
                             )
-                            or value.get("PoP")
-                            or value.get("pop")
+                            or value.get("MaxT")
                         )
 
-                        break
-
-            # 如果沒有找到目前時段
-            if current_pop is None and pop_times:
-
-                value = pop_times[0].get(
-                    "ElementValue",
-                    {}
-                )
-
-                current_pop = (
-                    value.get(
-                        "ProbabilityOfPrecipitation"
-                    )
-                    or value.get("PoP")
-                    or value.get("pop")
-                )
+                        if max_temp is not None:
+                            break
 
             # ==================================================
-            # 找今天最低溫
+            # 8. 最後整理
             # ==================================================
-            min_temp = None
+            if not weather:
+                weather = "天氣資料讀取中"
 
-            today_str = tw_time.strftime(
-                "%Y-%m-%d"
-            )
-
-            for item in min_temp_times:
-
-                start_time = parse_time(
-                    item.get("StartTime")
-                )
-
-                if (
-                    start_time
-                    and start_time.strftime(
-                        "%Y-%m-%d"
-                    ) == today_str
-                ):
-
-                    value = item.get(
-                        "ElementValue",
-                        {}
-                    )
-
-                    min_temp = (
-                        value.get(
-                            "MinTemperature"
-                        )
-                        or value.get("MinT")
-                        or value.get("minT")
-                    )
-
-                    if min_temp is not None:
-                        break
-
-            # ==================================================
-            # 找今天最高溫
-            # ==================================================
-            max_temp = None
-
-            for item in max_temp_times:
-
-                start_time = parse_time(
-                    item.get("StartTime")
-                )
-
-                if (
-                    start_time
-                    and start_time.strftime(
-                        "%Y-%m-%d"
-                    ) == today_str
-                ):
-
-                    value = item.get(
-                        "ElementValue",
-                        {}
-                    )
-
-                    max_temp = (
-                        value.get(
-                            "MaxTemperature"
-                        )
-                        or value.get("MaxT")
-                        or value.get("maxT")
-                    )
-
-                    if max_temp is not None:
-                        break
-
-            # ==================================================
-            # 找不到今天溫度時，使用第一筆
-            # ==================================================
-            if min_temp is None and min_temp_times:
-
-                value = min_temp_times[0].get(
-                    "ElementValue",
-                    {}
-                )
-
-                min_temp = (
-                    value.get(
-                        "MinTemperature"
-                    )
-                    or value.get("MinT")
-                    or value.get("minT")
-                )
-
-            if max_temp is None and max_temp_times:
-
-                value = max_temp_times[0].get(
-                    "ElementValue",
-                    {}
-                )
-
-                max_temp = (
-                    value.get(
-                        "MaxTemperature"
-                    )
-                    or value.get("MaxT")
-                    or value.get("maxT")
-                )
-
-            # ==================================================
-            # 預設值
-            # ==================================================
-            if current_weather is None:
-                current_weather = "天氣資料讀取中"
-
-            if current_pop is None:
-                current_pop = "?"
+            if pop is None:
+                pop = "?"
 
             if min_temp is None:
                 min_temp = "?"
@@ -395,18 +478,15 @@ def get_weather_report():
             if max_temp is None:
                 max_temp = "?"
 
-            # ==================================================
-            # 組成一行
-            # ==================================================
             return (
-                f"📍 {district_name} "
+                f"📍 {district} "
                 f"{min_temp}~{max_temp}° "
-                f"{current_weather} "
-                f"(降雨{current_pop}%)"
+                f"{weather} "
+                f"(降雨{pop}%)"
             )
 
         # ==================================================
-        # 取得兩個資料集
+        # 取得兩個城市資料
         # ==================================================
         weather_results = {}
 
@@ -424,92 +504,100 @@ def get_weather_report():
 
             try:
 
-                r = requests.get(
+                response = requests.get(
                     url,
                     params=params,
                     timeout=15
                 )
 
-                if r.status_code != 200:
+                if response.status_code != 200:
+
+                    print(
+                        f"氣象 API {dataset_id} "
+                        f"HTTP {response.status_code}"
+                    )
+
                     continue
 
-                data = r.json()
+                data = response.json()
 
-                locations = data.get(
-                    "records",
-                    {}
-                ).get(
-                    "Locations",
-                    []
+                locations = (
+                    data
+                    .get("records", {})
+                    .get("Locations", [])
                 )
 
                 # --------------------------------------------------
-                # API 有可能：
+                # 標準格式：
                 #
                 # Locations
-                #   └─ Location
-                #
-                # 也可能直接就是 Location
+                #   └── Location
                 # --------------------------------------------------
                 location_list = []
 
                 for group in locations:
 
-                    if isinstance(group, dict):
+                    if not isinstance(group, dict):
+                        continue
 
-                        if "Location" in group:
+                    if "Location" in group:
 
-                            location_list.extend(
-                                group.get(
-                                    "Location",
-                                    []
-                                )
+                        location_list.extend(
+                            group.get(
+                                "Location",
+                                []
                             )
+                        )
 
-                        elif "location" in group:
+                    elif "location" in group:
 
-                            location_list.extend(
-                                group.get(
-                                    "location",
-                                    []
-                                )
+                        location_list.extend(
+                            group.get(
+                                "location",
+                                []
                             )
+                        )
 
+                # 如果 API 直接回傳 Location
                 if not location_list:
+
                     location_list = locations
 
                 # --------------------------------------------------
-                # 解析每一個行政區
+                # 解析行政區
                 # --------------------------------------------------
                 for location in location_list:
 
-                    result = get_district_weather(
+                    result = parse_location(
                         location
                     )
 
                     if result:
 
-                        district_name = location.get(
+                        district = location.get(
                             "LocationName",
                             ""
                         )
 
                         weather_results[
-                            district_name
+                            district
                         ] = result
 
-            except Exception:
-                # 某一個資料集失敗，不影響另一個
-                continue
+            except Exception as e:
+
+                print(
+                    f"氣象資料集 {dataset_id} "
+                    f"解析失敗：{e}"
+                )
 
         # ==================================================
-        # 組合 LINE 天氣訊息
+        # 組合 LINE 訊息
         # ==================================================
         msg = (
-            f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
+            f"🌤 一分鐘報天氣 "
+            f"{date_str} 🌤\n\n"
         )
 
-        # 按照指定順序顯示
         for district in target_districts:
 
             msg += (
@@ -523,7 +611,7 @@ def get_weather_report():
         msg += "\n"
 
         # ==================================================
-        # 原本的文字完全保留
+        # 原本訊息完全保留
         # ==================================================
         msg += (
             "每天深蹲有益健康，肌肉是身體最大的葡萄糖使用器官，"
@@ -537,8 +625,7 @@ def get_weather_report():
     except Exception as e:
 
         return f"❌ 氣象解析失敗: {str(e)}"
-
-
+        
 # ------------------------------
 # 台積電股價抓取 (優化 Headers)
 # ------------------------------
