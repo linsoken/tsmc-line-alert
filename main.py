@@ -13,6 +13,7 @@ CWA_API_KEY = os.environ.get("CWA_API_KEY")
 
 TSMC_TARGET_PRICE = 2500  # 您要通知的價格
 
+
 # ------------------------------
 # 氣象預報函式
 # ------------------------------
@@ -144,61 +145,143 @@ def get_weather_report():
             return None
 
         def get_rain_probabilities(elements):
-            """取得 07:00、13:00、19:00 所在 6 小時區段的降雨機率。"""
+            """取得 07:00、13:00、19:00 所在時段的降雨機率。
+
+            CWA F-D0047 同時可能提供 PoP6h、PoP，
+            也可能在「天氣預報綜合描述」中直接帶有「降雨機率XX%」。
+            因此這裡採多層 fallback，避免 API 欄位格式變化造成 ?%。
+            """
             result = {hour: None for hour in rain_hours}
 
-            # 這次明確優先使用 CWA 的 PoP6h（6 小時降雨機率）。
-            pop6h_el = find_element(
-                elements,
-                [
-                    "6小時降雨機率",
-                    "PoP6h"
-                ]
-            )
+            def normalize_probability(value):
+                if value is None:
+                    return None
+                if isinstance(value, (int, float)):
+                    return str(int(value)) if float(value).is_integer() else str(value)
+                text = str(value).strip()
+                match = re.search(r"(\d+(?:\.\d+)?)", text)
+                return match.group(1) if match else None
 
-            if pop6h_el:
-                times = pop6h_el.get("Time", [])
-                for hour in rain_hours:
-                    target_time = tw_time.replace(
-                        hour=hour,
-                        minute=0,
-                        second=0,
-                        microsecond=0
-                    )
-                    value = get_value_for_target_time(
-                        times,
-                        target_time
-                    )
-                    if value is not None:
-                        result[hour] = str(value)
+            def set_from_element(element):
+                if not element:
+                    return
+                times = element.get("Time", [])
+                if not isinstance(times, list):
+                    return
 
-            # 如果 API 沒有 PoP6h，才退回 PoP（12 小時降雨機率）。
-            pop_el = find_element(
-                elements,
-                [
-                    "12小時降雨機率",
-                    "PoP",
-                    "ProbabilityOfPrecipitation"
-                ]
-            )
-
-            if pop_el:
-                times = pop_el.get("Time", [])
                 for hour in rain_hours:
                     if result[hour] is not None:
                         continue
+
                     target_time = tw_time.replace(
                         hour=hour,
                         minute=0,
                         second=0,
                         microsecond=0
                     )
-                    value = get_value_for_target_time(
-                        times,
-                        target_time
-                    )
-                    if value is not None:
-                        result[hour] = str(value)
+
+                    # 1. 優先找涵蓋該時間的預報區間。
+                    for item in times:
+                        start = parse_time(item.get("StartTime"))
+                        end = parse_time(item.get("EndTime"))
+                        if start and end and start <= target_time < end:
+                            value = get_value_ci(
+                                get_element_value(item),
+                                "ProbabilityOfPrecipitation",
+                                "PoP6h",
+                                "PoP",
+                                "value",
+                                "Value"
+                            )
+                            value = normalize_probability(value)
+                            if value is not None:
+                                result[hour] = value
+                                break
+
+                    # 2. 某些格式只有 DataTime。
+                    if result[hour] is None:
+                        latest = None
+                        latest_time = None
+                        for item in times:
+                            data_time = parse_time(item.get("DataTime"))
+                            if data_time and data_time <= target_time:
+                                if latest_time is None or data_time > latest_time:
+                                    latest = item
+                                    latest_time = data_time
+                        if latest is not None:
+                            value = get_value_ci(
+                                get_element_value(latest),
+                                "ProbabilityOfPrecipitation",
+                                "PoP6h",
+                                "PoP",
+                                "value",
+                                "Value"
+                            )
+                            value = normalize_probability(value)
+                            if value is not None:
+                                result[hour] = value
+
+            # 第一層：直接找 CWA 的 PoP6h。
+            for element in elements:
+                name = str(element.get("ElementName", ""))
+                if name in ("6小時降雨機率", "PoP6h") or "PoP6h" in name:
+                    set_from_element(element)
+
+            # 第二層：PoP / 12小時降雨機率。
+            for element in elements:
+                name = str(element.get("ElementName", ""))
+                if name in ("12小時降雨機率", "PoP", "ProbabilityOfPrecipitation"):
+                    set_from_element(element)
+
+            # 第三層：CWA「天氣預報綜合描述」本身就包含「降雨機率XX%」。
+            # 這是目前最穩定的 fallback，因為 F-D0047 的公開資料範例
+            # 明確以 WeatherDescription 提供每個時段的降雨機率。
+            if any(result[hour] is None for hour in rain_hours):
+                description_element = None
+                for element in elements:
+                    name = str(element.get("ElementName", ""))
+                    if name == "天氣預報綜合描述" or "WeatherDescription" in name:
+                        description_element = element
+                        break
+
+                if description_element:
+                    for item in description_element.get("Time", []):
+                        start = parse_time(item.get("StartTime"))
+                        end = parse_time(item.get("EndTime"))
+                        if not start or not end:
+                            continue
+
+                        value = get_element_value(item)
+                        description = get_value_ci(
+                            value,
+                            "WeatherDescription",
+                            "weatherDescription",
+                            "Description",
+                            "description"
+                        )
+                        if not description:
+                            description = json.dumps(
+                                value,
+                                ensure_ascii=False
+                            )
+
+                        match = re.search(
+                            r"降雨機率\s*(\d+(?:\.\d+)?)\s*%",
+                            str(description)
+                        )
+                        if not match:
+                            continue
+
+                        probability = match.group(1)
+                        for hour in rain_hours:
+                            target_time = tw_time.replace(
+                                hour=hour,
+                                minute=0,
+                                second=0,
+                                microsecond=0
+                            )
+                            if start <= target_time < end and result[hour] is None:
+                                result[hour] = probability
 
             return result
 
@@ -375,7 +458,7 @@ def get_weather_report():
                 pop = rain_probs.get(hour)
                 pop_text = str(pop) if pop is not None else "?"
                 lines.append(
-                    f"   {hour:02d}:00 降雨{pop_text}%"
+                    f"   {hour:02d}:00      降雨{pop_text}%"
                 )
 
             return "\n".join(lines)
