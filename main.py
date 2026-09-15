@@ -705,11 +705,27 @@ def main():
 
     tw_hour = tw_time.hour
 
+    # GitHub Actions 手動執行時，天氣與股價都推播
+    is_manual_run = (
+        os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    )
+
+    if is_manual_run:
+
+        weather_msg = (
+            get_weather_report()
+        )
+
+        send_line_message_to_all(
+            all_users,
+            weather_msg
+        )
+
     # --------------------------------------------------
     # 早上 7 點（或排程微小延遲的 8 點）
     # 只發送一次氣象，絕不重疊
     # --------------------------------------------------
-    if tw_hour == 7 or tw_hour == 8:
+    if (tw_hour == 7 or tw_hour == 8) and not is_manual_run:
 
         weather_msg = (
             get_weather_report()
@@ -725,7 +741,7 @@ def main():
     # 13:00 ~ 23:59
     # GitHub Actions 若排程延遲，也仍然執行台積電監控
     # --------------------------------------------------
-    elif 13 <= tw_hour <= 23:
+    elif 13 <= tw_hour <= 23 or is_manual_run:
 
         try:
 
