@@ -96,7 +96,7 @@ def get_weather_report():
                 current = find_current_time_data(desc_el.get("Time", []))
                 if current:
                     value = get_element_value(current)
-                    weather_desc = get_value_ci(value, "WeatherDescription", "Description", "weatherDescription") or ""
+                    weather_desc = get_value_ci(value, "WeatherDescription", "Description", "weatherDescription", "value", "Value") or ""
                     if not isinstance(weather_desc, str): weather_desc = str(weather_desc)
 
             weather = ""
@@ -108,7 +108,7 @@ def get_weather_report():
                 if wx_el:
                     current = find_current_time_data(wx_el.get("Time", []))
                     if current:
-                        weather = get_value_ci(get_element_value(current), "Weather", "Wx") or ""
+                        weather = get_value_ci(get_element_value(current), "Weather", "Wx", "value", "Value") or ""
 
             pop = None
             if weather_desc:
@@ -119,7 +119,7 @@ def get_weather_report():
                 if pop_el:
                     current = find_current_time_data(pop_el.get("Time", []))
                     if current:
-                        pop = get_value_ci(get_element_value(current), "ProbabilityOfPrecipitation", "PoP", "PoP6h")
+                        pop = get_value_ci(get_element_value(current), "ProbabilityOfPrecipitation", "PoP", "PoP6h", "value", "Value")
                         if pop is not None: pop = str(pop)
 
             min_temp = max_temp = None
