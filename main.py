@@ -406,12 +406,18 @@ def send_line_message_to_all(
             ]
         }
 
-        requests.post(
+        response = requests.post(
             url,
             headers=headers,
             json=body,
             timeout=10
         )
+
+        if response.status_code >= 300:
+            print(
+                f"LINE 推播失敗 HTTP {response.status_code}: "
+                f"{response.text}"
+            )
 
 
 # ------------------------------
@@ -454,11 +460,11 @@ def main():
         )
 
     # --------------------------------------------------
-    # 下午 1 點到 6 點
-    # 13:00 ~ 18:59
-    # 執行台積電監控
+    # 下午 1 點以後
+    # 13:00 ~ 23:59
+    # GitHub Actions 若排程延遲，也仍然執行台積電監控
     # --------------------------------------------------
-    elif 13 <= tw_hour <= 18:
+    elif 13 <= tw_hour <= 23:
 
         try:
 
