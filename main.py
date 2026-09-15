@@ -221,6 +221,40 @@ def get_weather_report():
                             if value is not None:
                                 result[hour] = value
 
+                    # 3. 若 07:00 剛好落在資料第一個預報區間前，
+                    #    某些 API 版本會沒有可用的「上一筆 DataTime」。
+                    #    此時改取距離 target_time 最近的預報區間，
+                    #    避免 07:00 被錯誤顯示成 ?%。
+                    if result[hour] is None:
+                        nearest = None
+                        nearest_distance = None
+                        for item in times:
+                            start = parse_time(item.get("StartTime"))
+                            end = parse_time(item.get("EndTime"))
+                            if start and end:
+                                if target_time < start:
+                                    distance = (start - target_time).total_seconds()
+                                elif target_time >= end:
+                                    distance = (target_time - end).total_seconds()
+                                else:
+                                    distance = 0
+                                if nearest_distance is None or distance < nearest_distance:
+                                    nearest = item
+                                    nearest_distance = distance
+
+                        if nearest is not None:
+                            value = get_value_ci(
+                                get_element_value(nearest),
+                                "ProbabilityOfPrecipitation",
+                                "PoP6h",
+                                "PoP",
+                                "value",
+                                "Value"
+                            )
+                            value = normalize_probability(value)
+                            if value is not None:
+                                result[hour] = value
+
             # 第一層：直接找 CWA 的 PoP6h。
             for element in elements:
                 name = str(element.get("ElementName", ""))
@@ -454,11 +488,17 @@ def get_weather_report():
                 )
             ]
 
+            # 讓「時間」從行政區名稱的位置開始，
+            # 並讓「降雨」對齊到上方的「25~28°」欄位。
+            # 📍 北投區 25~28° 多雲
+            #    07:00    降雨20%
+            #    13:00    降雨30%
+            #    19:00    降雨40%
             for hour in rain_hours:
                 pop = rain_probs.get(hour)
                 pop_text = str(pop) if pop is not None else "?"
                 lines.append(
-                    f"   {hour:02d}:00      降雨{pop_text}%"
+                    f"   {hour:02d}:00    降雨{pop_text}%"
                 )
 
             return "\n".join(lines)
