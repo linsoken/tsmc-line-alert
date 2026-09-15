@@ -22,7 +22,7 @@ def get_weather_report():
         return "⚠️ 缺少 CWA_API_KEY，無法取得氣象資訊。"
 
     weather_datasets = ["F-D0047-061", "F-D0047-069"]
-    target_districts = ["北投區", "萬華區", "淡水區", "信義區"]
+    target_districts = ["北投區", "萬華區", "信義區", "淡水區"]
     rain_hours = [7, 13, 19]
 
     try:
