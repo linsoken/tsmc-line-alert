@@ -23,19 +23,30 @@ def get_weather_report():
 
     weather_datasets = ["F-D0047-061", "F-D0047-069"]
     target_districts = ["北投區", "萬華區", "淡水區", "信義區"]
+    rain_hours = [7, 13, 19]
 
     try:
         tw_time = datetime.utcnow() + timedelta(hours=8)
-        week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-        date_str = tw_time.strftime(f"%m/%d ({week_list[tw_time.weekday()]})")
+        week_list = [
+            "星期一", "星期二", "星期三", "星期四",
+            "星期五", "星期六", "星期日"
+        ]
+        date_str = tw_time.strftime(
+            f"%m/%d ({week_list[tw_time.weekday()]})"
+        )
 
         def parse_time(value):
-            if not value: return None
+            if not value:
+                return None
             try:
-                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(
+                    value.replace("Z", "+00:00")
+                )
                 if dt.tzinfo is not None:
                     from datetime import timezone
-                    dt = dt.astimezone(timezone(timedelta(hours=8)))
+                    dt = dt.astimezone(
+                        timezone(timedelta(hours=8))
+                    )
                 return dt.replace(tzinfo=None)
             except Exception:
                 return None
@@ -53,33 +64,158 @@ def get_weather_report():
             return value if isinstance(value, dict) else {}
 
         def get_value_ci(value, *keys):
-            if not isinstance(value, dict): return None
+            if not isinstance(value, dict):
+                return None
             for key in keys:
-                if key in value: return value[key]
-            lower_map = {str(k).lower(): v for k, v in value.items()}
+                if key in value:
+                    return value[key]
+            lower_map = {
+                str(k).lower(): v
+                for k, v in value.items()
+            }
             for key in keys:
-                if key.lower() in lower_map: return lower_map[key.lower()]
+                if key.lower() in lower_map:
+                    return lower_map[key.lower()]
             return None
 
         def find_current_time_data(times):
-            if not times: return None
+            if not times:
+                return None
+
             for item in times:
-                start = parse_time(item.get("StartTime")); end = parse_time(item.get("EndTime"))
-                if start and end and start <= tw_time < end: return item
+                start = parse_time(item.get("StartTime"))
+                end = parse_time(item.get("EndTime"))
+                if start and end and start <= tw_time < end:
+                    return item
+
             latest = None
             for item in times:
                 data_time = parse_time(item.get("DataTime"))
                 if data_time and data_time <= tw_time:
-                    if latest is None or data_time > (parse_time(latest.get("DataTime")) or datetime.min): latest = item
+                    if (
+                        latest is None
+                        or data_time > (
+                            parse_time(latest.get("DataTime"))
+                            or datetime.min
+                        )
+                    ):
+                        latest = item
+
             return latest if latest is not None else times[0]
+
+        def get_value_for_target_time(times, target_time):
+            """找出涵蓋指定時間的預報資料。"""
+            if not times:
+                return None
+
+            # 優先使用 StartTime / EndTime 判斷預報區間。
+            for item in times:
+                start = parse_time(item.get("StartTime"))
+                end = parse_time(item.get("EndTime"))
+                if start and end and start <= target_time < end:
+                    return get_value_ci(
+                        get_element_value(item),
+                        "ProbabilityOfPrecipitation",
+                        "PoP6h",
+                        "PoP",
+                        "value",
+                        "Value"
+                    )
+
+            # 某些資料格式只有 DataTime，則取 target 前最近的一筆。
+            latest = None
+            latest_time = None
+            for item in times:
+                data_time = parse_time(item.get("DataTime"))
+                if data_time and data_time <= target_time:
+                    if latest_time is None or data_time > latest_time:
+                        latest = item
+                        latest_time = data_time
+
+            if latest is not None:
+                return get_value_ci(
+                    get_element_value(latest),
+                    "ProbabilityOfPrecipitation",
+                    "PoP6h",
+                    "PoP",
+                    "value",
+                    "Value"
+                )
+
+            return None
+
+        def get_rain_probabilities(elements):
+            """取得 07:00、13:00、19:00 所在 6 小時區段的降雨機率。"""
+            result = {hour: None for hour in rain_hours}
+
+            # 這次明確優先使用 CWA 的 PoP6h（6 小時降雨機率）。
+            pop6h_el = find_element(
+                elements,
+                [
+                    "6小時降雨機率",
+                    "PoP6h"
+                ]
+            )
+
+            if pop6h_el:
+                times = pop6h_el.get("Time", [])
+                for hour in rain_hours:
+                    target_time = tw_time.replace(
+                        hour=hour,
+                        minute=0,
+                        second=0,
+                        microsecond=0
+                    )
+                    value = get_value_for_target_time(
+                        times,
+                        target_time
+                    )
+                    if value is not None:
+                        result[hour] = str(value)
+
+            # 如果 API 沒有 PoP6h，才退回 PoP（12 小時降雨機率）。
+            pop_el = find_element(
+                elements,
+                [
+                    "12小時降雨機率",
+                    "PoP",
+                    "ProbabilityOfPrecipitation"
+                ]
+            )
+
+            if pop_el:
+                times = pop_el.get("Time", [])
+                for hour in rain_hours:
+                    if result[hour] is not None:
+                        continue
+                    target_time = tw_time.replace(
+                        hour=hour,
+                        minute=0,
+                        second=0,
+                        microsecond=0
+                    )
+                    value = get_value_for_target_time(
+                        times,
+                        target_time
+                    )
+                    if value is not None:
+                        result[hour] = str(value)
+
+            return result
 
         def get_daily_temperature(elements, names, today_str):
             # 先嘗試直接讀取 CWA 的 MinT / MaxT 欄位。
             element = find_element(elements, names)
             if element:
                 for item in element.get("Time", []):
-                    check_time = parse_time(item.get("StartTime")) or parse_time(item.get("DataTime"))
-                    if check_time and check_time.strftime("%Y-%m-%d") == today_str:
+                    check_time = (
+                        parse_time(item.get("StartTime"))
+                        or parse_time(item.get("DataTime"))
+                    )
+                    if (
+                        check_time
+                        and check_time.strftime("%Y-%m-%d") == today_str
+                    ):
                         value = get_element_value(item)
                         result = get_value_ci(
                             value,
@@ -90,9 +226,8 @@ def get_weather_report():
                         if result is not None:
                             return str(result)
 
-            # CWA F-D0047 的實際 JSON/XML 有些版本沒有獨立的 MinT/MaxT，
-            # 而是提供「溫度」每小時預報。這時直接用今天 00:00~23:00
-            # 的逐時溫度計算今日最低/最高溫，避免顯示 ?~?。
+            # 有些版本沒有獨立的 MinT / MaxT，
+            # 改用今天逐時溫度計算今日最低 / 最高溫。
             temperature_element = find_element(
                 elements,
                 ["溫度", "T", "Temperature"]
@@ -101,10 +236,16 @@ def get_weather_report():
                 values = []
                 for item in temperature_element.get("Time", []):
                     data_time = parse_time(item.get("DataTime"))
-                    if not data_time or data_time.strftime("%Y-%m-%d") != today_str:
+                    if (
+                        not data_time
+                        or data_time.strftime("%Y-%m-%d") != today_str
+                    ):
                         continue
                     value = get_element_value(item)
-                    raw = get_value_ci(value, "Temperature", "T", "value", "Value")
+                    raw = get_value_ci(
+                        value,
+                        "Temperature", "T", "value", "Value"
+                    )
                     if raw is None:
                         continue
                     try:
@@ -113,94 +254,214 @@ def get_weather_report():
                         continue
 
                 if values:
-                    result = min(values) if "MinT" in names or "最低溫度" in names or "MinTemperature" in names else max(values)
-                    return str(int(result)) if float(result).is_integer() else str(result)
+                    result = (
+                        min(values)
+                        if (
+                            "MinT" in names
+                            or "最低溫度" in names
+                            or "MinTemperature" in names
+                        )
+                        else max(values)
+                    )
+                    return (
+                        str(int(result))
+                        if float(result).is_integer()
+                        else str(result)
+                    )
 
             return None
 
         def parse_location(location):
             district = location.get("LocationName", "")
-            if district not in target_districts: return None
-            elements = location.get("WeatherElement", [])
-            if not elements: return None
+            if district not in target_districts:
+                return None
 
-            desc_el = find_element(elements, ["天氣預報綜合描述", "WeatherDescription"])
+            elements = location.get("WeatherElement", [])
+            if not elements:
+                return None
+
+            # 天氣狀況：維持原本抓目前時段的方式。
+            desc_el = find_element(
+                elements,
+                ["天氣預報綜合描述", "WeatherDescription"]
+            )
             weather_desc = ""
             if desc_el:
-                current = find_current_time_data(desc_el.get("Time", []))
+                current = find_current_time_data(
+                    desc_el.get("Time", [])
+                )
                 if current:
                     value = get_element_value(current)
-                    weather_desc = get_value_ci(value, "WeatherDescription", "Description", "weatherDescription", "value", "Value") or ""
-                    if not isinstance(weather_desc, str): weather_desc = str(weather_desc)
+                    weather_desc = get_value_ci(
+                        value,
+                        "WeatherDescription",
+                        "Description",
+                        "weatherDescription",
+                        "value",
+                        "Value"
+                    ) or ""
+                    if not isinstance(weather_desc, str):
+                        weather_desc = str(weather_desc)
 
             weather = ""
             if weather_desc:
                 weather = weather_desc.split("。")[0].strip()
 
             if not weather:
-                wx_el = find_element(elements, ["天氣現象", "Wx", "Weather"])
+                wx_el = find_element(
+                    elements,
+                    ["天氣現象", "Wx", "Weather"]
+                )
                 if wx_el:
-                    current = find_current_time_data(wx_el.get("Time", []))
+                    current = find_current_time_data(
+                        wx_el.get("Time", [])
+                    )
                     if current:
-                        weather = get_value_ci(get_element_value(current), "Weather", "Wx", "value", "Value") or ""
+                        weather = get_value_ci(
+                            get_element_value(current),
+                            "Weather",
+                            "Wx",
+                            "value",
+                            "Value"
+                        ) or ""
 
-            pop = None
-            if weather_desc:
-                m = re.search(r"降雨機率\s*(\d+)\s*%", weather_desc)
-                if m: pop = m.group(1)
-            if pop is None:
-                pop_el = find_element(elements, ["12小時降雨機率", "6小時降雨機率", "PoP", "PoP6h", "ProbabilityOfPrecipitation"])
-                if pop_el:
-                    current = find_current_time_data(pop_el.get("Time", []))
-                    if current:
-                        pop = get_value_ci(get_element_value(current), "ProbabilityOfPrecipitation", "PoP", "PoP6h", "value", "Value")
-                        if pop is not None: pop = str(pop)
-
+            # 今日最高 / 最低溫度。
             min_temp = max_temp = None
             if weather_desc:
-                m = re.search(r"最低溫度\s*攝氏\s*(-?\d+(?:\.\d+)?)\s*度", weather_desc)
-                if m: min_temp = m.group(1)
-                m = re.search(r"最高溫度\s*攝氏\s*(-?\d+(?:\.\d+)?)\s*度", weather_desc)
-                if m: max_temp = m.group(1)
+                m = re.search(
+                    r"最低溫度\s*攝氏\s*(-?\d+(?:\.\d+)?)\s*度",
+                    weather_desc
+                )
+                if m:
+                    min_temp = m.group(1)
+
+                m = re.search(
+                    r"最高溫度\s*攝氏\s*(-?\d+(?:\.\d+)?)\s*度",
+                    weather_desc
+                )
+                if m:
+                    max_temp = m.group(1)
 
             today_str = tw_time.strftime("%Y-%m-%d")
-            if min_temp is None: min_temp = get_daily_temperature(elements, ["MinT", "MinTemperature", "最低溫度"], today_str)
-            if max_temp is None: max_temp = get_daily_temperature(elements, ["MaxT", "MaxTemperature", "最高溫度"], today_str)
+            if min_temp is None:
+                min_temp = get_daily_temperature(
+                    elements,
+                    ["MinT", "MinTemperature", "最低溫度"],
+                    today_str
+                )
+            if max_temp is None:
+                max_temp = get_daily_temperature(
+                    elements,
+                    ["MaxT", "MaxTemperature", "最高溫度"],
+                    today_str
+                )
 
-            return f"📍 {district} {min_temp if min_temp is not None else '?'}~{max_temp if max_temp is not None else '?'}° {weather or '天氣資料讀取中'} (降雨{pop if pop is not None else '?'}%)"
+            rain_probs = get_rain_probabilities(elements)
+
+            # LINE 顯示格式：
+            # 📍 北投區 25~28° 陰
+            #    07:00 降雨20%
+            #    13:00 降雨30%
+            #    19:00 降雨40%
+            lines = [
+                (
+                    f"📍 {district} "
+                    f"{min_temp if min_temp is not None else '?'}~"
+                    f"{max_temp if max_temp is not None else '?'}° "
+                    f"{weather or '天氣資料讀取中'}"
+                )
+            ]
+
+            for hour in rain_hours:
+                pop = rain_probs.get(hour)
+                pop_text = str(pop) if pop is not None else "?"
+                lines.append(
+                    f"   {hour:02d}:00 降雨{pop_text}%"
+                )
+
+            return "\n".join(lines)
 
         weather_results = {}
+
         for dataset_id in weather_datasets:
-            url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{dataset_id}"
-            params = {"Authorization": CWA_API_KEY, "format": "JSON", "LocationName": ",".join(target_districts)}
+            url = (
+                "https://opendata.cwa.gov.tw/api/v1/rest/datastore/"
+                f"{dataset_id}"
+            )
+            params = {
+                "Authorization": CWA_API_KEY,
+                "format": "JSON",
+                "LocationName": ",".join(target_districts)
+            }
+
             try:
-                response = requests.get(url, params=params, timeout=15)
+                response = requests.get(
+                    url,
+                    params=params,
+                    timeout=15
+                )
                 if response.status_code != 200:
-                    print(f"氣象 API {dataset_id} HTTP {response.status_code}"); continue
+                    print(
+                        f"氣象 API {dataset_id} "
+                        f"HTTP {response.status_code}"
+                    )
+                    continue
+
                 records = response.json().get("records", {})
-                locations = records.get("locations") or records.get("Locations") or []
+                locations = (
+                    records.get("locations")
+                    or records.get("Locations")
+                    or []
+                )
+
                 location_list = []
                 for group in locations:
                     if isinstance(group, dict):
-                        if "location" in group: location_list.extend(group.get("location", []))
-                        elif "Location" in group: location_list.extend(group.get("Location", []))
-                if not location_list: location_list = locations
+                        if "location" in group:
+                            location_list.extend(
+                                group.get("location", [])
+                            )
+                        elif "Location" in group:
+                            location_list.extend(
+                                group.get("Location", [])
+                            )
+
+                if not location_list:
+                    location_list = locations
+
                 for location in location_list:
                     if isinstance(location, dict):
                         result = parse_location(location)
-                        if result: weather_results[location.get("LocationName", "")] = result
-            except Exception as e:
-                print(f"氣象資料集 {dataset_id} 解析失敗：{e}")
+                        if result:
+                            weather_results[
+                                location.get("LocationName", "")
+                            ] = result
 
-        msg = f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
+            except Exception as e:
+                print(
+                    f"氣象資料集 {dataset_id} 解析失敗：{e}"
+                )
+
+        msg = (
+            f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
+        )
+
         for district in target_districts:
-            msg += weather_results.get(district, f"📍 {district} 天氣資料讀取中") + "\n"
+            msg += (
+                weather_results.get(
+                    district,
+                    f"📍 {district} 天氣資料讀取中"
+                )
+                + "\n"
+            )
+
         msg += "\n"
-        msg += ("每天深蹲有益健康，肌肉是身體最大的葡萄糖使用器官，"
-                "也是最大的血糖代謝器官，占比高達80%呢! "
-                "2026年年底就會來到3000元的! "
-                "祝福您吉祥如意闔家平安幸福永相隨。")
+        msg += (
+            "祝福您吉祥如意闔家平安幸福永相隨。"
+        )
+
         return msg
+
     except Exception as e:
         return f"❌ 氣象解析失敗: {str(e)}"
 
