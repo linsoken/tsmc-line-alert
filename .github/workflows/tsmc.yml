@@ -2,21 +2,26 @@ name: TSMC Price & Weather Alert
 
 on:
   schedule:
-    # 台灣 07:00 (每天執行，包含週末)
-    - cron: "0 23 * * *"
-    # 台灣 14:00 (週一至週五)
-    - cron: "0 6 * * 1-5"
+    # 台灣 07:00（每天執行，包含週末）
+    - cron: "0 7 * * *"
+      timezone: "Asia/Taipei"
+
+    # 台灣 14:00（週一至週五）
+    - cron: "0 14 * * 1-5"
+      timezone: "Asia/Taipei"
+
   workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
+
     steps:
     - name: Checkout repo
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Setup Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: "3.11"
 
