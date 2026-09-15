@@ -514,17 +514,18 @@ def get_weather_report():
             ]
 
             # 排版：
-            # 時間從行政區名稱的左側開始，
-            # 「降雨」固定對齊到上方的「25~28°」欄位。
+            # 排版：
+            # 使用 3 個半形空格，讓時間不要像之前那版一樣整體太靠右。
+            # 「降雨」與百分比之間固定 1 個空格。
             # 📍 北投區 25~28° 多雲
-            # 07:00   降雨20%
-            # 13:00   降雨30%
-            # 19:00   降雨40%
+            #    07:00   降雨 20%
+            #    13:00   降雨 20%
+            #    19:00   降雨 20%
             for hour in rain_hours:
                 pop = rain_probs.get(hour)
                 pop_text = str(pop) if pop is not None else "?"
                 lines.append(
-                    f"　　　{hour:02d}:00　降雨{pop_text}%"
+                    f"   {hour:02d}:00   降雨 {pop_text}%"
                 )
 
             return "\n".join(lines)
