@@ -74,14 +74,48 @@ def get_weather_report():
             return latest if latest is not None else times[0]
 
         def get_daily_temperature(elements, names, today_str):
+            # 先嘗試直接讀取 CWA 的 MinT / MaxT 欄位。
             element = find_element(elements, names)
-            if not element: return None
-            for item in element.get("Time", []):
-                check_time = parse_time(item.get("StartTime")) or parse_time(item.get("DataTime"))
-                if check_time and check_time.strftime("%Y-%m-%d") == today_str:
+            if element:
+                for item in element.get("Time", []):
+                    check_time = parse_time(item.get("StartTime")) or parse_time(item.get("DataTime"))
+                    if check_time and check_time.strftime("%Y-%m-%d") == today_str:
+                        value = get_element_value(item)
+                        result = get_value_ci(
+                            value,
+                            "MinTemperature", "MinT", "最低溫度",
+                            "MaxTemperature", "MaxT", "最高溫度",
+                            "Temperature", "value", "Value"
+                        )
+                        if result is not None:
+                            return str(result)
+
+            # CWA F-D0047 的實際 JSON/XML 有些版本沒有獨立的 MinT/MaxT，
+            # 而是提供「溫度」每小時預報。這時直接用今天 00:00~23:00
+            # 的逐時溫度計算今日最低/最高溫，避免顯示 ?~?。
+            temperature_element = find_element(
+                elements,
+                ["溫度", "T", "Temperature"]
+            )
+            if temperature_element:
+                values = []
+                for item in temperature_element.get("Time", []):
+                    data_time = parse_time(item.get("DataTime"))
+                    if not data_time or data_time.strftime("%Y-%m-%d") != today_str:
+                        continue
                     value = get_element_value(item)
-                    result = get_value_ci(value, "MinTemperature", "MinT", "MaxTemperature", "MaxT", "最低溫度", "最高溫度")
-                    if result is not None: return str(result)
+                    raw = get_value_ci(value, "Temperature", "T", "value", "Value")
+                    if raw is None:
+                        continue
+                    try:
+                        values.append(float(raw))
+                    except (TypeError, ValueError):
+                        continue
+
+                if values:
+                    result = min(values) if "MinT" in names or "最低溫度" in names or "MinTemperature" in names else max(values)
+                    return str(int(result)) if float(result).is_integer() else str(result)
+
             return None
 
         def parse_location(location):
