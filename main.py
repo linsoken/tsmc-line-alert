@@ -427,7 +427,7 @@ def get_weather_report():
                 pop = rain_probs.get(hour)
                 pop_text = str(pop) if pop is not None else "?"
                 lines.append(
-                    f"     {hour:02d}:00   降雨 {pop_text}%"
+                    f"      {hour:02d}:00   降雨 {pop_text}%"
                 )
 
             return "\n".join(lines)
@@ -442,7 +442,9 @@ def get_weather_report():
             params = {
                 "Authorization": CWA_API_KEY,
                 "format": "JSON",
-                "LocationName": ",".join(target_districts)
+                "LocationName": ",".join(target_districts),
+                # 明確要求 CWA 回傳 PoP6h，避免 API 預設只回傳 3 小時降雨機率。
+                "elementName": "Wx,PoP6h,WeatherDescription,MinT,MaxT,T"
             }
 
             try:
