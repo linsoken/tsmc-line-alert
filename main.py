@@ -151,17 +151,16 @@ def get_weather_report():
             return None
 
         def get_rain_probabilities(elements):
-            """取得 07:00、13:00、19:00 的降雨機率。
+            """取得 07:00、13:00、19:00 對應的 6 小時降雨機率。
 
-            CWA 的 F-D0047 不同資料版本可能把降雨機率放在：
-            1. PoP6h / 6小時降雨機率
-            2. PoP / 12小時降雨機率
-            3. 天氣預報綜合描述中的「降雨機率XX%」
+            只使用 CWA 的 PoP6h（6 小時降雨機率），不再把 PoP12h
+            或 WeatherDescription 當成替代值，避免不同時段其實抓到
+            同一個 12 小時預報區間。
 
-            這裡不只抓固定一層的 ElementValue，而是遞迴尋找
-            ProbabilityOfPrecipitation / PoP6h / PoP 等欄位，
-            並在 07:00 落在第一個預報區間之前時，直接使用第一個
-            可用預報區間，避免顯示 ?%。
+            例如：
+                07:00 -> 06:00~12:00
+                13:00 -> 12:00~18:00
+                19:00 -> 18:00~24:00
             """
             result = {hour: None for hour in rain_hours}
 
@@ -175,23 +174,19 @@ def get_weather_report():
                 return match.group(1) if match else None
 
             def recursive_probability(value):
-                """從巢狀 dict/list 中找真正的降雨機率欄位。"""
+                """從 ElementValue 巢狀 dict/list 找 PoP6h。"""
                 if isinstance(value, dict):
-                    # 優先找明確的降雨機率欄位
                     for key, val in value.items():
                         key_text = str(key).lower()
-                        if key_text in {
-                            "probabilityofprecipitation",
-                            "pop6h",
-                            "pop",
-                            "6小時降雨機率",
-                            "12小時降雨機率",
-                        } or "probabilityofprecipitation" in key_text:
+                        if (
+                            key_text == "pop6h"
+                            or key_text == "probabilityofprecipitation"
+                            or "6小時降雨機率" in key_text
+                        ):
                             found = normalize_probability(val)
                             if found is not None:
                                 return found
 
-                    # 有些 CWA 回傳會再包一層，繼續往下找
                     for val in value.values():
                         found = recursive_probability(val)
                         if found is not None:
@@ -208,13 +203,22 @@ def get_weather_report():
             def item_probability(item):
                 return recursive_probability(item.get("ElementValue"))
 
-            def apply_element(element):
-                if not element:
-                    return
+            # 只找 PoP6h，不再 fallback 到 PoP12h。
+            pop6h_elements = []
+            for element in elements:
+                name = str(element.get("ElementName", ""))
+                if (
+                    name == "PoP6h"
+                    or name == "6小時降雨機率"
+                    or "PoP6h" in name
+                    or "6小時降雨機率" in name
+                ):
+                    pop6h_elements.append(element)
 
+            for element in pop6h_elements:
                 times = element.get("Time", [])
-                if not isinstance(times, list) or not times:
-                    return
+                if not isinstance(times, list):
+                    continue
 
                 for hour in rain_hours:
                     if result[hour] is not None:
@@ -227,120 +231,18 @@ def get_weather_report():
                         microsecond=0
                     )
 
-                    # 1. 最準確：直接命中 StartTime ~ EndTime。
+                    # 嚴格依 CWA StartTime ~ EndTime 判斷 6 小時區間。
                     for item in times:
                         start = parse_time(item.get("StartTime"))
                         end = parse_time(item.get("EndTime"))
-                        if start and end and start <= target_time < end:
+                        if not (start and end):
+                            continue
+
+                        if start <= target_time < end:
                             value = item_probability(item)
                             if value is not None:
                                 result[hour] = value
                                 break
-
-                    if result[hour] is not None:
-                        continue
-
-                    # 2. 只有 DataTime 的資料格式。
-                    previous = None
-                    previous_time = None
-                    for item in times:
-                        data_time = parse_time(item.get("DataTime"))
-                        if data_time and data_time <= target_time:
-                            if previous_time is None or data_time > previous_time:
-                                previous = item
-                                previous_time = data_time
-
-                    if previous is not None:
-                        value = item_probability(previous)
-                        if value is not None:
-                            result[hour] = value
-                            continue
-
-                    # 3. 重要 fallback：如果 07:00 在 API 第一個區間之前，
-                    # 就使用第一個有降雨機率的預報區間。
-                    # 例如 API 從 08:00 才開始提供預報時，07:00 不再顯示 ?%。
-                    for item in times:
-                        value = item_probability(item)
-                        if value is not None:
-                            result[hour] = value
-                            break
-
-            # 第一層：PoP6h / 6小時降雨機率
-            for element in elements:
-                name = str(element.get("ElementName", ""))
-                if (
-                    name in ("6小時降雨機率", "PoP6h")
-                    or "PoP6h" in name
-                    or "6小時降雨機率" in name
-                ):
-                    apply_element(element)
-
-            # 第二層：PoP / 12小時降雨機率
-            for element in elements:
-                name = str(element.get("ElementName", ""))
-                if (
-                    name in ("12小時降雨機率", "PoP", "ProbabilityOfPrecipitation")
-                    or "12小時降雨機率" in name
-                ):
-                    apply_element(element)
-
-            # 第三層：天氣預報綜合描述中的「降雨機率XX%」
-            if any(result[hour] is None for hour in rain_hours):
-                for element in elements:
-                    name = str(element.get("ElementName", ""))
-                    if name != "天氣預報綜合描述" and "WeatherDescription" not in name:
-                        continue
-
-                    times = element.get("Time", [])
-                    if not isinstance(times, list):
-                        continue
-
-                    for item in times:
-                        value = get_element_value(item)
-                        description = get_value_ci(
-                            value,
-                            "WeatherDescription",
-                            "weatherDescription",
-                            "Description",
-                            "description"
-                        )
-                        if not description:
-                            description = json.dumps(value, ensure_ascii=False)
-
-                        match = re.search(
-                            r"降雨機率\s*(\d+(?:\.\d+)?)\s*%",
-                            str(description)
-                        )
-                        if not match:
-                            continue
-
-                        probability = match.group(1)
-                        start = parse_time(item.get("StartTime"))
-                        end = parse_time(item.get("EndTime"))
-
-                        for hour in rain_hours:
-                            if result[hour] is not None:
-                                continue
-                            target_time = tw_time.replace(
-                                hour=hour,
-                                minute=0,
-                                second=0,
-                                microsecond=0
-                            )
-                            if start and end and start <= target_time < end:
-                                result[hour] = probability
-
-            # 最後一道保底：如果仍然有 ?，直接使用目前已取得的第一個
-            # 有效降雨機率。這是為了避免 07:00 因 API 第一個區間時間差
-            # 而顯示 ?%。
-            available = next(
-                (result[h] for h in rain_hours if result[h] is not None),
-                None
-            )
-            if available is not None:
-                for hour in rain_hours:
-                    if result[hour] is None:
-                        result[hour] = available
 
             return result
 
@@ -515,7 +417,7 @@ def get_weather_report():
 
             # 排版：
             # 排版：
-            # 使用 3 個半形空格，讓時間不要像之前那版一樣整體太靠右。
+            # 使用 5 個半形空格，讓時間再往右一點，對齊行政區名稱下方。
             # 「降雨」與百分比之間固定 1 個空格。
             # 📍 北投區 25~28° 多雲
             #    07:00   降雨 20%
@@ -525,7 +427,7 @@ def get_weather_report():
                 pop = rain_probs.get(hour)
                 pop_text = str(pop) if pop is not None else "?"
                 lines.append(
-                    f"   {hour:02d}:00   降雨 {pop_text}%"
+                    f"     {hour:02d}:00   降雨 {pop_text}%"
                 )
 
             return "\n".join(lines)
@@ -871,10 +773,10 @@ def main():
         )
 
     # --------------------------------------------------
-    # 早上 7 點（或排程微小延遲的 8 點）
+    # 早上 5 點（或排程微小延遲的 6 點）
     # 只發送一次氣象，絕不重疊
     # --------------------------------------------------
-    if (tw_hour == 7 or tw_hour == 8) and not is_manual_run:
+    if (tw_hour == 5 or tw_hour == 6) and not is_manual_run:
 
         weather_msg = (
             get_weather_report()
