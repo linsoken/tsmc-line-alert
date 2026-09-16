@@ -151,102 +151,206 @@ def get_weather_report():
             return None
 
         def get_rain_probabilities(elements):
-            """取得 07:00、13:00、19:00 對應的 CWA PoP6h。
-
-            CWA 的 PoP6h 是 6 小時分段：
-              07:00 -> 06:00~12:00
-              13:00 -> 12:00~18:00
-              19:00 -> 18:00~24:00
-
-            這裡只接受 PoP6h，不拿 PoP12h 或 WeatherDescription 冒充。
             """
-            result = {hour: None for hour in rain_hours}
+            取得 07:00、13:00、19:00 的降雨機率。
 
-            def normalize_probability(value):
+            優先：
+              1. PoP6h 元素
+              2. WeatherDescription 中的「降雨機率XX%」
+
+            這樣可以相容中央氣象署不同 JSON 格式。
+            """
+
+            result = {
+                hour: None
+                for hour in rain_hours
+            }
+
+            def extract_probability(value):
                 if value is None:
                     return None
+
                 if isinstance(value, bool):
                     return None
+
                 if isinstance(value, (int, float)):
-                    return str(int(value)) if float(value).is_integer() else str(value)
+                    return (
+                        str(int(value))
+                        if float(value).is_integer()
+                        else str(value)
+                    )
+
                 text = str(value).strip()
-                match = re.search(r"(\d+(?:\.\d+)?)", text)
-                return match.group(1) if match else None
+
+                # 直接抓「降雨機率 20%」
+                patterns = [
+                    r"降雨機率\s*(\d+(?:\.\d+)?)\s*%",
+                    r"降雨機率\s*(\d+(?:\.\d+)?)\s*％",
+
+                    # 英文欄位格式
+                    r"ProbabilityOfPrecipitation\s*[=:：]\s*(\d+(?:\.\d+)?)",
+                    r"PoP6h\s*[=:：]\s*(\d+(?:\.\d+)?)",
+                    r"PoP\s*[=:：]\s*(\d+(?:\.\d+)?)"
+                ]
+
+                for pattern in patterns:
+                    match = re.search(
+                        pattern,
+                        text,
+                        re.IGNORECASE
+                    )
+
+                    if match:
+                        return match.group(1)
+
+                # 如果本身就是「20」或「20%」
+                match = re.fullmatch(
+                    r"\s*(\d+(?:\.\d+)?)\s*%?\s*",
+                    text
+                )
+
+                if match:
+                    return match.group(1)
+
+                return None
 
             def recursive_probability(value):
-                """相容 CWA JSON 不同 ElementValue 寫法。"""
+                """
+                遞迴尋找 CWA JSON 裡的降雨機率，
+                相容 dict / list / 不同大小寫欄位名稱。
+                """
+
                 if isinstance(value, dict):
-                    # CWA 正常欄位名稱
-                    preferred_keys = (
+
+                    # 先找最可能的欄位
+                    preferred_keys = [
                         "ProbabilityOfPrecipitation",
                         "PoP6h",
+                        "PoP",
                         "probabilityofprecipitation",
                         "pop6h",
-                        "6小時降雨機率",
-                    )
+                        "pop",
+                        "6小時降雨機率"
+                    ]
+
                     for key in preferred_keys:
                         if key in value:
-                            found = normalize_probability(value[key])
+                            found = extract_probability(
+                                value[key]
+                            )
+
                             if found is not None:
                                 return found
 
-                    # 有些回傳會是 value / Value + measure / Measure
-                    # 只有 measure 明確是百分比時才把 value 當降雨機率。
-                    measure = value.get("measure", value.get("Measure", ""))
-                    raw_value = value.get("value", value.get("Value"))
-                    if raw_value is not None and (
-                        "百分比" in str(measure)
-                        or "%" in str(raw_value)
-                    ):
-                        found = normalize_probability(raw_value)
-                        if found is not None:
-                            return found
+                    # 不同 JSON 可能是：
+                    # {"value": "20", "measure": "百分比"}
+                    raw_value = value.get(
+                        "value",
+                        value.get("Value")
+                    )
 
+                    measure = value.get(
+                        "measure",
+                        value.get("Measure", "")
+                    )
+
+                    if raw_value is not None:
+
+                        found = extract_probability(
+                            raw_value
+                        )
+
+                        if found is not None:
+
+                            # 有百分比標示，直接採用
+                            if (
+                                "百分比" in str(measure)
+                                or "%" in str(raw_value)
+                                or "％" in str(raw_value)
+                            ):
+                                return found
+
+                    # 繼續往下搜尋所有欄位
                     for val in value.values():
+
                         found = recursive_probability(val)
+
                         if found is not None:
                             return found
 
                 elif isinstance(value, list):
+
                     for val in value:
+
                         found = recursive_probability(val)
+
                         if found is not None:
                             return found
 
                 return None
 
             def item_probability(item):
-                # 標準 JSON：ElementValue 裡面
-                found = recursive_probability(item.get("ElementValue"))
+
+                # 標準 CWA JSON
+                found = recursive_probability(
+                    item.get("ElementValue")
+                )
+
                 if found is not None:
                     return found
 
-                # 兼容 API 展平欄位：ProbabilityOfPrecipitation 可能直接在 Time 裡
-                for key in (
+                # 有些版本直接放在 Time 裡
+                for key in [
                     "ProbabilityOfPrecipitation",
                     "PoP6h",
-                    "6小時降雨機率",
-                ):
+                    "PoP",
+                    "6小時降雨機率"
+                ]:
+
                     if key in item:
-                        found = normalize_probability(item.get(key))
+
+                        found = extract_probability(
+                            item.get(key)
+                        )
+
                         if found is not None:
                             return found
 
                 return None
 
-            # 只找 PoP6h 元素。CWA 官方文件定義 PoP6h 為 6 小時分段。
+            # ==================================================
+            # 第一階段：尋找 PoP6h
+            # ==================================================
+
             pop6h_elements = []
+
             for element in elements:
-                name = str(element.get("ElementName", "")).strip()
-                if name.lower() == "pop6h" or name == "6小時降雨機率":
+
+                name = str(
+                    element.get(
+                        "ElementName",
+                        ""
+                    )
+                ).strip()
+
+                if (
+                    name.lower() == "pop6h"
+                    or name == "6小時降雨機率"
+                ):
                     pop6h_elements.append(element)
 
             for element in pop6h_elements:
-                times = element.get("Time", [])
+
+                times = element.get(
+                    "Time",
+                    []
+                )
+
                 if not isinstance(times, list):
                     continue
 
                 for hour in rain_hours:
+
                     if result[hour] is not None:
                         continue
 
@@ -257,40 +361,250 @@ def get_weather_report():
                         microsecond=0
                     )
 
-                    # 嚴格使用 StartTime <= 目標時間 < EndTime。
+                    # 先用 StartTime / EndTime
                     for item in times:
-                        start = parse_time(item.get("StartTime"))
-                        end = parse_time(item.get("EndTime"))
+
+                        start = parse_time(
+                            item.get("StartTime")
+                        )
+
+                        end = parse_time(
+                            item.get("EndTime")
+                        )
+
                         if not (start and end):
                             continue
 
                         if start <= target_time < end:
-                            value = item_probability(item)
+
+                            value = item_probability(
+                                item
+                            )
+
                             if value is not None:
+
                                 result[hour] = value
+
                                 break
 
-                    # 如果 CWA 此版本的 JSON 沒有 StartTime/EndTime，
-                    # 才使用 DataTime 對應；仍然只使用 PoP6h 元素。
+                    # 沒有 StartTime / EndTime 時，
+                    # 使用 DataTime 前最近的一筆
                     if result[hour] is None:
+
                         candidates = []
+
                         for item in times:
-                            data_time = parse_time(item.get("DataTime"))
-                            if data_time is not None and data_time <= target_time:
-                                value = item_probability(item)
+
+                            data_time = parse_time(
+                                item.get("DataTime")
+                            )
+
+                            if (
+                                data_time is not None
+                                and data_time <= target_time
+                            ):
+
+                                value = item_probability(
+                                    item
+                                )
+
                                 if value is not None:
-                                    candidates.append((data_time, value))
+
+                                    candidates.append(
+                                        (
+                                            data_time,
+                                            value
+                                        )
+                                    )
+
                         if candidates:
-                            candidates.sort(key=lambda x: x[0])
+
+                            candidates.sort(
+                                key=lambda x: x[0]
+                            )
+
                             result[hour] = candidates[-1][1]
 
-            # 安全診斷：如果完全找不到 PoP6h，只印元素名稱，
-            # 不印 API Key 或任何敏感資訊，方便 GitHub Actions 查原因。
-            if not pop6h_elements:
-                print(
-                    "⚠️ CWA 回傳資料中找不到 PoP6h；收到的 ElementName：",
-                    [str(e.get("ElementName", "")) for e in elements]
+            # ==================================================
+            # 第二階段：
+            # 如果 PoP6h 找不到，從 WeatherDescription 抓
+            # 「降雨機率20%」之類的文字
+            # ==================================================
+
+            desc_el = find_element(
+                elements,
+                [
+                    "天氣預報綜合描述",
+                    "WeatherDescription"
+                ]
+            )
+
+            if desc_el:
+
+                times = desc_el.get(
+                    "Time",
+                    []
                 )
+
+                if isinstance(times, list):
+
+                    for hour in rain_hours:
+
+                        if result[hour] is not None:
+                            continue
+
+                        target_time = tw_time.replace(
+                            hour=hour,
+                            minute=0,
+                            second=0,
+                            microsecond=0
+                        )
+
+                        matched_item = None
+
+                        # 先找涵蓋指定時間的區間
+                        for item in times:
+
+                            start = parse_time(
+                                item.get("StartTime")
+                            )
+
+                            end = parse_time(
+                                item.get("EndTime")
+                            )
+
+                            if (
+                                start
+                                and end
+                                and start <= target_time < end
+                            ):
+
+                                matched_item = item
+                                break
+
+                        # 如果沒有區間，找完全相同 DataTime
+                        if matched_item is None:
+
+                            for item in times:
+
+                                data_time = parse_time(
+                                    item.get("DataTime")
+                                )
+
+                                if (
+                                    data_time is not None
+                                    and data_time == target_time
+                                ):
+
+                                    matched_item = item
+                                    break
+
+                        if matched_item:
+
+                            value = get_element_value(
+                                matched_item
+                            )
+
+                            description = get_value_ci(
+                                value,
+                                "WeatherDescription",
+                                "Description",
+                                "weatherDescription",
+                                "value",
+                                "Value"
+                            )
+
+                            probability = extract_probability(
+                                description
+                            )
+
+                            if probability is not None:
+
+                                result[hour] = probability
+
+            # ==================================================
+            # 第三階段：
+            # WeatherDescription 沒有完全對應時間時，
+            # 找指定時間之前最近一筆
+            # ==================================================
+
+            if desc_el:
+
+                times = desc_el.get(
+                    "Time",
+                    []
+                )
+
+                if isinstance(times, list):
+
+                    for hour in rain_hours:
+
+                        if result[hour] is not None:
+                            continue
+
+                        target_time = tw_time.replace(
+                            hour=hour,
+                            minute=0,
+                            second=0,
+                            microsecond=0
+                        )
+
+                        candidates = []
+
+                        for item in times:
+
+                            data_time = parse_time(
+                                item.get("DataTime")
+                            )
+
+                            if (
+                                data_time is None
+                                or data_time > target_time
+                            ):
+                                continue
+
+                            value = get_element_value(
+                                item
+                            )
+
+                            description = get_value_ci(
+                                value,
+                                "WeatherDescription",
+                                "Description",
+                                "weatherDescription",
+                                "value",
+                                "Value"
+                            )
+
+                            probability = extract_probability(
+                                description
+                            )
+
+                            if probability is not None:
+
+                                candidates.append(
+                                    (
+                                        data_time,
+                                        probability
+                                    )
+                                )
+
+                        if candidates:
+
+                            candidates.sort(
+                                key=lambda x: x[0]
+                            )
+
+                            result[hour] = candidates[-1][1]
+
+            # ==================================================
+            # 診斷訊息
+            # ==================================================
+
+            print(
+                "🌧 降雨機率解析結果：",
+                result
+            )
 
             return result
 
