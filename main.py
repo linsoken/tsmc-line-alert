@@ -4,487 +4,887 @@ import os
 import json
 from datetime import datetime, timedelta
 
-
-# =========================================================
-# 環境變數
-# =========================================================
-
+# --- 環境變數 ---
 CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID")
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID")
-
 CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-
 CWA_API_KEY = os.environ.get("CWA_API_KEY")
 
-TSMC_TARGET_PRICE = 2500
+TSMC_TARGET_PRICE = 2500  # 您要通知的價格
 
 
-# =========================================================
-# CWA 天氣資料
-# =========================================================
+# ------------------------------
+# 氣象預報函式
+# ------------------------------
+def get_weather_report():
+    if not CWA_API_KEY:
+        return "⚠️ 缺少 CWA_API_KEY，無法取得氣象資訊。"
 
-def get_weather_data(dataset_id, location_name):
-
-    url = (
-        f"https://opendata.cwa.gov.tw/"
-        f"api/v1/rest/datastore/{dataset_id}"
-    )
-
-    params = {
-        "Authorization": CWA_API_KEY,
-        "format": "JSON"
-    }
+    weather_datasets = ["F-D0047-061", "F-D0047-069"]
+    target_districts = ["北投區", "萬華區", "信義區", "淡水區"]
+    rain_hours = [7, 13, 19]
 
     try:
-
-        response = requests.get(
-            url,
-            params=params,
-            timeout=10
+        tw_time = datetime.utcnow() + timedelta(hours=8)
+        week_list = [
+            "星期一", "星期二", "星期三", "星期四",
+            "星期五", "星期六", "星期日"
+        ]
+        date_str = tw_time.strftime(
+            f"%m/%d ({week_list[tw_time.weekday()]})"
         )
 
-        if response.status_code != 200:
+        def parse_time(value):
+            if not value:
+                return None
+            try:
+                dt = datetime.fromisoformat(
+                    value.replace("Z", "+00:00")
+                )
+                if dt.tzinfo is not None:
+                    from datetime import timezone
+                    dt = dt.astimezone(
+                        timezone(timedelta(hours=8))
+                    )
+                return dt.replace(tzinfo=None)
+            except Exception:
+                return None
 
-            print(
-                f"氣象資料集 {dataset_id} "
-                f"HTTP錯誤：{response.status_code}"
-            )
+        def find_element(elements, names):
+            for element in elements:
+                if element.get("ElementName", "") in names:
+                    return element
+            return None
+
+        def get_element_value(item):
+            value = item.get("ElementValue", {})
+            if isinstance(value, list):
+                # CWA 部分資料會把多個欄位放在同一個 ElementValue 陣列，
+                # 不只取第一個，避免第一個不是降雨機率。
+                merged = {}
+                for v in value:
+                    if isinstance(v, dict):
+                        merged.update(v)
+                return merged
+            return value if isinstance(value, dict) else {}
+
+        def get_value_ci(value, *keys):
+            if not isinstance(value, dict):
+                return None
+            for key in keys:
+                if key in value:
+                    return value[key]
+            lower_map = {
+                str(k).lower(): v
+                for k, v in value.items()
+            }
+            for key in keys:
+                if key.lower() in lower_map:
+                    return lower_map[key.lower()]
+            return None
+
+        def find_current_time_data(times):
+            if not times:
+                return None
+
+            for item in times:
+                start = parse_time(item.get("StartTime"))
+                end = parse_time(item.get("EndTime"))
+                if start and end and start <= tw_time < end:
+                    return item
+
+            latest = None
+            for item in times:
+                data_time = parse_time(item.get("DataTime"))
+                if data_time and data_time <= tw_time:
+                    if (
+                        latest is None
+                        or data_time > (
+                            parse_time(latest.get("DataTime"))
+                            or datetime.min
+                        )
+                    ):
+                        latest = item
+
+            return latest if latest is not None else times[0]
+
+        def get_value_for_target_time(times, target_time):
+            """找出涵蓋指定時間的預報資料。"""
+            if not times:
+                return None
+
+            # 優先使用 StartTime / EndTime 判斷預報區間。
+            for item in times:
+                start = parse_time(item.get("StartTime"))
+                end = parse_time(item.get("EndTime"))
+                if start and end and start <= target_time < end:
+                    return get_value_ci(
+                        get_element_value(item),
+                        "ProbabilityOfPrecipitation",
+                        "PoP6h",
+                        "PoP",
+                        "value",
+                        "Value"
+                    )
+
+            # 某些資料格式只有 DataTime，則取 target 前最近的一筆。
+            latest = None
+            latest_time = None
+            for item in times:
+                data_time = parse_time(item.get("DataTime"))
+                if data_time and data_time <= target_time:
+                    if latest_time is None or data_time > latest_time:
+                        latest = item
+                        latest_time = data_time
+
+            if latest is not None:
+                return get_value_ci(
+                    get_element_value(latest),
+                    "ProbabilityOfPrecipitation",
+                    "PoP6h",
+                    "PoP",
+                    "value",
+                    "Value"
+                )
 
             return None
 
-        data = response.json()
+        def get_rain_probabilities(elements):
+            """
+            取得 07:00、13:00、19:00 的降雨機率。
 
-        return data
+            優先：
+              1. PoP6h 元素
+              2. WeatherDescription 中的「降雨機率XX%」
 
-    except Exception as e:
+            這樣可以相容中央氣象署不同 JSON 格式。
+            """
 
-        print(
-            f"氣象資料集 {dataset_id} "
-            f"讀取失敗：{e}"
-        )
+            result = {
+                hour: None
+                for hour in rain_hours
+            }
 
-        return None
+            def extract_probability(value):
+                if value is None:
+                    return None
 
+                if isinstance(value, bool):
+                    return None
 
-# =========================================================
-# 解析天氣地點
-# =========================================================
-
-def parse_location(
-    data,
-    location_name
-):
-
-    try:
-
-        records = data.get(
-            "records",
-            {}
-        )
-
-        locations = records.get(
-            "Locations",
-            []
-        )
-
-        for locations_item in locations:
-
-            location_list = (
-                locations_item
-                .get("Location", [])
-            )
-
-            for location in location_list:
-
-                name = location.get(
-                    "LocationName"
-                )
-
-                if name == location_name:
-
-                    return location
-
-        return None
-
-    except Exception as e:
-
-        print(
-            f"解析地點失敗：{e}"
-        )
-
-        return None
-
-
-# =========================================================
-# 取得天氣描述
-# =========================================================
-
-def get_weather_description(
-    location
-):
-
-    try:
-
-        weather_elements = (
-            location
-            .get("WeatherElement", [])
-        )
-
-        for element in weather_elements:
-
-            element_name = element.get(
-                "ElementName"
-            )
-
-            if element_name == "Wx":
-
-                times = element.get(
-                    "Time",
-                    []
-                )
-
-                if times:
-
-                    parameter = (
-                        times[0]
-                        .get(
-                            "ElementValue",
-                            [{}]
-                        )[0]
-                    )
-
+                if isinstance(value, (int, float)):
                     return (
-                        parameter
-                        .get("Weather", "")
+                        str(int(value))
+                        if float(value).is_integer()
+                        else str(value)
                     )
 
-        return ""
+                text = str(value).strip()
 
-    except Exception:
+                # 直接抓「降雨機率 20%」
+                patterns = [
+                    r"降雨機率\s*(\d+(?:\.\d+)?)\s*%",
+                    r"降雨機率\s*(\d+(?:\.\d+)?)\s*％",
 
-        return ""
+                    # 英文欄位格式
+                    r"ProbabilityOfPrecipitation\s*[=:：]\s*(\d+(?:\.\d+)?)",
+                    r"PoP6h\s*[=:：]\s*(\d+(?:\.\d+)?)",
+                    r"PoP\s*[=:：]\s*(\d+(?:\.\d+)?)"
+                ]
 
-
-# =========================================================
-# 取得最高最低溫
-# =========================================================
-
-def get_temperature_range(
-    location
-):
-
-    min_temp = None
-    max_temp = None
-
-    try:
-
-        weather_elements = (
-            location
-            .get("WeatherElement", [])
-        )
-
-        for element in weather_elements:
-
-            element_name = element.get(
-                "ElementName"
-            )
-
-            if element_name in [
-                "MinT",
-                "MaxT"
-            ]:
-
-                times = element.get(
-                    "Time",
-                    []
-                )
-
-                if not times:
-                    continue
-
-                value = (
-                    times[0]
-                    .get(
-                        "ElementValue",
-                        [{}]
-                    )[0]
-                    .get("Temperature")
-                )
-
-                if value is None:
-                    continue
-
-                if element_name == "MinT":
-
-                    min_temp = value
-
-                elif element_name == "MaxT":
-
-                    max_temp = value
-
-        return min_temp, max_temp
-
-    except Exception:
-
-        return None, None
-
-
-# =========================================================
-# 取得降雨機率
-# =========================================================
-
-def get_rain_probabilities(
-    location
-):
-
-    results = []
-
-    try:
-
-        weather_elements = (
-            location
-            .get("WeatherElement", [])
-        )
-
-        for element in weather_elements:
-
-            element_name = element.get(
-                "ElementName",
-                ""
-            )
-
-            if element_name not in [
-                "PoP6h",
-                "PoP",
-                "ProbabilityOfPrecipitation"
-            ]:
-
-                continue
-
-            times = element.get(
-                "Time",
-                []
-            )
-
-            for item in times:
-
-                start_time = item.get(
-                    "StartTime",
-                    ""
-                )
-
-                end_time = item.get(
-                    "EndTime",
-                    ""
-                )
-
-                element_value = item.get(
-                    "ElementValue",
-                    []
-                )
-
-                if not element_value:
-                    continue
-
-                value_obj = (
-                    element_value[0]
-                )
-
-                value = (
-                    value_obj.get(
-                        "ProbabilityOfPrecipitation"
-                    )
-                    or value_obj.get(
-                        "PoP6h"
-                    )
-                    or value_obj.get(
-                        "PoP"
-                    )
-                    or value_obj.get(
-                        "value"
-                    )
-                    or value_obj.get(
-                        "Value"
-                    )
-                )
-
-                if value is None:
-                    continue
-
-                try:
-
-                    value = int(
-                        float(value)
+                for pattern in patterns:
+                    match = re.search(
+                        pattern,
+                        text,
+                        re.IGNORECASE
                     )
 
-                except:
+                    if match:
+                        return match.group(1)
 
-                    continue
+                # 如果本身就是「20」或「20%」
+                match = re.fullmatch(
+                    r"\s*(\d+(?:\.\d+)?)\s*%?\s*",
+                    text
+                )
 
-                if start_time:
+                if match:
+                    return match.group(1)
 
-                    try:
+                return None
 
-                        dt = datetime.fromisoformat(
-                            start_time
-                            .replace(
-                                "Z",
-                                "+00:00"
+            def recursive_probability(value):
+                """
+                遞迴尋找 CWA JSON 裡的降雨機率，
+                相容 dict / list / 不同大小寫欄位名稱。
+                """
+
+                if isinstance(value, dict):
+
+                    # 先找最可能的欄位
+                    preferred_keys = [
+                        "ProbabilityOfPrecipitation",
+                        "PoP6h",
+                        "PoP",
+                        "probabilityofprecipitation",
+                        "pop6h",
+                        "pop",
+                        "6小時降雨機率"
+                    ]
+
+                    for key in preferred_keys:
+                        if key in value:
+                            found = extract_probability(
+                                value[key]
                             )
-                        )
 
-                        display_time = (
-                            dt.strftime("%H:%M")
-                        )
+                            if found is not None:
+                                return found
 
-                    except:
-
-                        display_time = start_time
-
-                else:
-
-                    display_time = ""
-
-                results.append(
-                    (
-                        display_time,
-                        value
+                    # 不同 JSON 可能是：
+                    # {"value": "20", "measure": "百分比"}
+                    raw_value = value.get(
+                        "value",
+                        value.get("Value")
                     )
+
+                    measure = value.get(
+                        "measure",
+                        value.get("Measure", "")
+                    )
+
+                    if raw_value is not None:
+
+                        found = extract_probability(
+                            raw_value
+                        )
+
+                        if found is not None:
+
+                            # 有百分比標示，直接採用
+                            if (
+                                "百分比" in str(measure)
+                                or "%" in str(raw_value)
+                                or "％" in str(raw_value)
+                            ):
+                                return found
+
+                    # 繼續往下搜尋所有欄位
+                    for val in value.values():
+
+                        found = recursive_probability(val)
+
+                        if found is not None:
+                            return found
+
+                elif isinstance(value, list):
+
+                    for val in value:
+
+                        found = recursive_probability(val)
+
+                        if found is not None:
+                            return found
+
+                return None
+
+            def item_probability(item):
+
+                # 標準 CWA JSON
+                found = recursive_probability(
+                    item.get("ElementValue")
                 )
 
-        # -------------------------------------------------
-        # 如果 PoP 資料沒有抓到
-        # 從 WeatherDescription 抓「降雨機率 XX%」
-        # -------------------------------------------------
+                if found is not None:
+                    return found
 
-        if not results:
-
-            for element in weather_elements:
-
-                element_name = element.get(
-                    "ElementName",
-                    ""
-                )
-
-                if element_name not in [
-                    "WeatherDescription",
-                    "Wx"
+                # 有些版本直接放在 Time 裡
+                for key in [
+                    "ProbabilityOfPrecipitation",
+                    "PoP6h",
+                    "PoP",
+                    "6小時降雨機率"
                 ]:
 
-                    continue
+                    if key in item:
+
+                        found = extract_probability(
+                            item.get(key)
+                        )
+
+                        if found is not None:
+                            return found
+
+                return None
+
+            # ==================================================
+            # 第一階段：尋找 PoP6h
+            # ==================================================
+
+            pop6h_elements = []
+
+            for element in elements:
+
+                name = str(
+                    element.get(
+                        "ElementName",
+                        ""
+                    )
+                ).strip()
+
+                if (
+                    name.lower() == "pop6h"
+                    or name == "6小時降雨機率"
+                ):
+                    pop6h_elements.append(element)
+
+            for element in pop6h_elements:
 
                 times = element.get(
                     "Time",
                     []
                 )
 
-                for item in times:
+                if not isinstance(times, list):
+                    continue
 
-                    element_value = item.get(
-                        "ElementValue",
-                        []
-                    )
+                for hour in rain_hours:
 
-                    if not element_value:
+                    if result[hour] is not None:
                         continue
 
-                    text = json.dumps(
-                        element_value,
-                        ensure_ascii=False
+                    target_time = tw_time.replace(
+                        hour=hour,
+                        minute=0,
+                        second=0,
+                        microsecond=0
                     )
 
-                    match = re.search(
-                        r"降雨機率\s*(\d+)\s*%",
-                        text
-                    )
+                    # 先用 StartTime / EndTime
+                    for item in times:
 
-                    if not match:
-                        continue
-
-                    value = int(
-                        match.group(1)
-                    )
-
-                    start_time = item.get(
-                        "StartTime",
-                        ""
-                    )
-
-                    if start_time:
-
-                        try:
-
-                            dt = datetime.fromisoformat(
-                                start_time
-                                .replace(
-                                    "Z",
-                                    "+00:00"
-                                )
-                            )
-
-                            display_time = (
-                                dt.strftime("%H:%M")
-                            )
-
-                        except:
-
-                            display_time = start_time
-
-                    else:
-
-                        display_time = ""
-
-                    results.append(
-                        (
-                            display_time,
-                            value
+                        start = parse_time(
+                            item.get("StartTime")
                         )
+
+                        end = parse_time(
+                            item.get("EndTime")
+                        )
+
+                        if not (start and end):
+                            continue
+
+                        if start <= target_time < end:
+
+                            value = item_probability(
+                                item
+                            )
+
+                            if value is not None:
+
+                                result[hour] = value
+
+                                break
+
+                    # 沒有 StartTime / EndTime 時，
+                    # 使用 DataTime 前最近的一筆
+                    if result[hour] is None:
+
+                        candidates = []
+
+                        for item in times:
+
+                            data_time = parse_time(
+                                item.get("DataTime")
+                            )
+
+                            if (
+                                data_time is not None
+                                and data_time <= target_time
+                            ):
+
+                                value = item_probability(
+                                    item
+                                )
+
+                                if value is not None:
+
+                                    candidates.append(
+                                        (
+                                            data_time,
+                                            value
+                                        )
+                                    )
+
+                        if candidates:
+
+                            candidates.sort(
+                                key=lambda x: x[0]
+                            )
+
+                            result[hour] = candidates[-1][1]
+
+            # ==================================================
+            # 第二階段：
+            # 如果 PoP6h 找不到，從 WeatherDescription 抓
+            # 「降雨機率20%」之類的文字
+            # ==================================================
+
+            desc_el = find_element(
+                elements,
+                [
+                    "天氣預報綜合描述",
+                    "WeatherDescription"
+                ]
+            )
+
+            if desc_el:
+
+                times = desc_el.get(
+                    "Time",
+                    []
+                )
+
+                if isinstance(times, list):
+
+                    for hour in rain_hours:
+
+                        if result[hour] is not None:
+                            continue
+
+                        target_time = tw_time.replace(
+                            hour=hour,
+                            minute=0,
+                            second=0,
+                            microsecond=0
+                        )
+
+                        matched_item = None
+
+                        # 先找涵蓋指定時間的區間
+                        for item in times:
+
+                            start = parse_time(
+                                item.get("StartTime")
+                            )
+
+                            end = parse_time(
+                                item.get("EndTime")
+                            )
+
+                            if (
+                                start
+                                and end
+                                and start <= target_time < end
+                            ):
+
+                                matched_item = item
+                                break
+
+                        # 如果沒有區間，找完全相同 DataTime
+                        if matched_item is None:
+
+                            for item in times:
+
+                                data_time = parse_time(
+                                    item.get("DataTime")
+                                )
+
+                                if (
+                                    data_time is not None
+                                    and data_time == target_time
+                                ):
+
+                                    matched_item = item
+                                    break
+
+                        if matched_item:
+
+                            value = get_element_value(
+                                matched_item
+                            )
+
+                            description = get_value_ci(
+                                value,
+                                "WeatherDescription",
+                                "Description",
+                                "weatherDescription",
+                                "value",
+                                "Value"
+                            )
+
+                            probability = extract_probability(
+                                description
+                            )
+
+                            if probability is not None:
+
+                                result[hour] = probability
+
+            # ==================================================
+            # 第三階段：
+            # WeatherDescription 沒有完全對應時間時，
+            # 找指定時間之前最近一筆
+            # ==================================================
+
+            if desc_el:
+
+                times = desc_el.get(
+                    "Time",
+                    []
+                )
+
+                if isinstance(times, list):
+
+                    for hour in rain_hours:
+
+                        if result[hour] is not None:
+                            continue
+
+                        target_time = tw_time.replace(
+                            hour=hour,
+                            minute=0,
+                            second=0,
+                            microsecond=0
+                        )
+
+                        candidates = []
+
+                        for item in times:
+
+                            data_time = parse_time(
+                                item.get("DataTime")
+                            )
+
+                            if (
+                                data_time is None
+                                or data_time > target_time
+                            ):
+                                continue
+
+                            value = get_element_value(
+                                item
+                            )
+
+                            description = get_value_ci(
+                                value,
+                                "WeatherDescription",
+                                "Description",
+                                "weatherDescription",
+                                "value",
+                                "Value"
+                            )
+
+                            probability = extract_probability(
+                                description
+                            )
+
+                            if probability is not None:
+
+                                candidates.append(
+                                    (
+                                        data_time,
+                                        probability
+                                    )
+                                )
+
+                        if candidates:
+
+                            candidates.sort(
+                                key=lambda x: x[0]
+                            )
+
+                            result[hour] = candidates[-1][1]
+
+            # ==================================================
+            # 診斷訊息
+            # ==================================================
+
+            print(
+                "🌧 降雨機率解析結果：",
+                result
+            )
+
+            return result
+
+        def get_daily_temperature(elements, names, today_str):
+            # 先嘗試直接讀取 CWA 的 MinT / MaxT 欄位。
+            element = find_element(elements, names)
+            if element:
+                for item in element.get("Time", []):
+                    check_time = (
+                        parse_time(item.get("StartTime"))
+                        or parse_time(item.get("DataTime"))
+                    )
+                    if (
+                        check_time
+                        and check_time.strftime("%Y-%m-%d") == today_str
+                    ):
+                        value = get_element_value(item)
+                        result = get_value_ci(
+                            value,
+                            "MinTemperature", "MinT", "最低溫度",
+                            "MaxTemperature", "MaxT", "最高溫度",
+                            "Temperature", "value", "Value"
+                        )
+                        if result is not None:
+                            return str(result)
+
+            # 有些版本沒有獨立的 MinT / MaxT，
+            # 改用今天逐時溫度計算今日最低 / 最高溫。
+            temperature_element = find_element(
+                elements,
+                ["溫度", "T", "Temperature"]
+            )
+            if temperature_element:
+                values = []
+                for item in temperature_element.get("Time", []):
+                    data_time = parse_time(item.get("DataTime"))
+                    if (
+                        not data_time
+                        or data_time.strftime("%Y-%m-%d") != today_str
+                    ):
+                        continue
+                    value = get_element_value(item)
+                    raw = get_value_ci(
+                        value,
+                        "Temperature", "T", "value", "Value"
+                    )
+                    if raw is None:
+                        continue
+                    try:
+                        values.append(float(raw))
+                    except (TypeError, ValueError):
+                        continue
+
+                if values:
+                    result = (
+                        min(values)
+                        if (
+                            "MinT" in names
+                            or "最低溫度" in names
+                            or "MinTemperature" in names
+                        )
+                        else max(values)
+                    )
+                    return (
+                        str(int(result))
+                        if float(result).is_integer()
+                        else str(result)
                     )
 
-        # -------------------------------------------------
-        # 去除重複時間
-        # -------------------------------------------------
+            return None
 
-        unique = {}
+        def parse_location(location):
+            district = location.get("LocationName", "")
+            if district not in target_districts:
+                return None
 
-        for time_str, value in results:
+            elements = location.get("WeatherElement", [])
+            if not elements:
+                return None
 
-            if time_str not in unique:
+            # 天氣狀況：維持原本抓目前時段的方式。
+            desc_el = find_element(
+                elements,
+                ["天氣預報綜合描述", "WeatherDescription"]
+            )
+            weather_desc = ""
+            if desc_el:
+                current = find_current_time_data(
+                    desc_el.get("Time", [])
+                )
+                if current:
+                    value = get_element_value(current)
+                    weather_desc = get_value_ci(
+                        value,
+                        "WeatherDescription",
+                        "Description",
+                        "weatherDescription",
+                        "value",
+                        "Value"
+                    ) or ""
+                    if not isinstance(weather_desc, str):
+                        weather_desc = str(weather_desc)
 
-                unique[time_str] = value
+            weather = ""
+            if weather_desc:
+                weather = weather_desc.split("。")[0].strip()
 
-        results = list(
-            unique.items()
+            if not weather:
+                wx_el = find_element(
+                    elements,
+                    ["天氣現象", "Wx", "Weather"]
+                )
+                if wx_el:
+                    current = find_current_time_data(
+                        wx_el.get("Time", [])
+                    )
+                    if current:
+                        weather = get_value_ci(
+                            get_element_value(current),
+                            "Weather",
+                            "Wx",
+                            "value",
+                            "Value"
+                        ) or ""
+
+            # 今日最高 / 最低溫度。
+            min_temp = max_temp = None
+            if weather_desc:
+                m = re.search(
+                    r"最低溫度\s*攝氏\s*(-?\d+(?:\.\d+)?)\s*度",
+                    weather_desc
+                )
+                if m:
+                    min_temp = m.group(1)
+
+                m = re.search(
+                    r"最高溫度\s*攝氏\s*(-?\d+(?:\.\d+)?)\s*度",
+                    weather_desc
+                )
+                if m:
+                    max_temp = m.group(1)
+
+            today_str = tw_time.strftime("%Y-%m-%d")
+            if min_temp is None:
+                min_temp = get_daily_temperature(
+                    elements,
+                    ["MinT", "MinTemperature", "最低溫度"],
+                    today_str
+                )
+            if max_temp is None:
+                max_temp = get_daily_temperature(
+                    elements,
+                    ["MaxT", "MaxTemperature", "最高溫度"],
+                    today_str
+                )
+
+            rain_probs = get_rain_probabilities(elements)
+
+            # LINE 顯示格式：
+            # 📍 北投區 25~28° 陰
+            #    07:00 降雨20%
+            #    13:00 降雨30%
+            #    19:00 降雨40%
+            lines = [
+                (
+                    f"📍 {district} "
+                    f"{min_temp if min_temp is not None else '?'}~"
+                    f"{max_temp if max_temp is not None else '?'}° "
+                    f"{weather or '天氣資料讀取中'}"
+                )
+            ]
+
+            # 排版：
+            # 排版：
+            # 使用 5 個半形空格，讓時間再往右一點，對齊行政區名稱下方。
+            # 「降雨」與百分比之間固定 1 個空格。
+            # 📍 北投區 25~28° 多雲
+            #    07:00   降雨 20%
+            #    13:00   降雨 20%
+            #    19:00   降雨 20%
+            for hour in rain_hours:
+                pop = rain_probs.get(hour)
+                pop_text = str(pop) if pop is not None else "?"
+                lines.append(
+                    f"      {hour:02d}:00   降雨 {pop_text}%"
+                )
+
+            return "\n".join(lines)
+
+
+        weather_results = {}
+
+        for dataset_id in weather_datasets:
+            url = (
+                "https://opendata.cwa.gov.tw/api/v1/rest/datastore/"
+                f"{dataset_id}"
+            )
+            params = {
+                "format": "JSON",
+                # CWA 官方 API 參數名稱是 locationName（小寫 l）。
+                "locationName": ",".join(target_districts),
+                # 明確要求 6 小時降雨機率，不使用 12 小時 PoP。
+                "elementName": "Wx,PoP6h,WeatherDescription,MinT,MaxT,T"
+            }
+
+            try:
+                response = requests.get(
+                    url,
+                    headers={"Authorization": CWA_API_KEY},
+                    params=params,
+                    timeout=15
+                )
+                if response.status_code != 200:
+                    print(
+                        f"氣象 API {dataset_id} "
+                        f"HTTP {response.status_code}"
+                    )
+                    continue
+
+                records = response.json().get("records", {})
+                locations = (
+                    records.get("locations")
+                    or records.get("Locations")
+                    or []
+                )
+
+                location_list = []
+                for group in locations:
+                    if isinstance(group, dict):
+                        if "location" in group:
+                            location_list.extend(
+                                group.get("location", [])
+                            )
+                        elif "Location" in group:
+                            location_list.extend(
+                                group.get("Location", [])
+                            )
+
+                if not location_list:
+                    location_list = locations
+
+                for location in location_list:
+                    if isinstance(location, dict):
+                        result = parse_location(location)
+                        if result:
+                            weather_results[
+                                location.get("LocationName", "")
+                            ] = result
+
+            except Exception as e:
+                print(
+                    f"氣象資料集 {dataset_id} 解析失敗：{e}"
+                )
+
+        msg = (
+            f"🌤 一分鐘報天氣 {date_str} 🌤\n\n"
         )
 
-        # -------------------------------------------------
-        # 排序
-        # -------------------------------------------------
+        for district in target_districts:
+            msg += (
+                weather_results.get(
+                    district,
+                    f"📍 {district} 天氣資料讀取中"
+                )
+                + "\n"
+            )
 
-        results.sort(
-            key=lambda x: x[0]
+        msg += "\n"
+        msg += (
+            "祝福您吉祥如意闔家平安幸福永相隨。"
         )
 
-        print(
-            f"🌧 降雨機率解析結果：{results}"
-        )
-
-        return results
+        return msg
 
     except Exception as e:
+        return f"❌ 氣象解析失敗: {str(e)}"
 
-        print(
-            f"降雨機率解析失敗：{e}"
-        )
-
-        return []
-
-
-# =========================================================
-# Yahoo 股價
-# =========================================================
-
+# ------------------------------
+# 台積電股價抓取 (優化 Headers)
+# ------------------------------
 def get_price_from_yahoo():
 
     url = (
@@ -492,21 +892,22 @@ def get_price_from_yahoo():
         "v8/finance/chart/2330.TW"
     )
 
-    params = {
-        "range": "5d",
-        "interval": "1d"
-    }
-
+    # 強化 Headers 模擬，避免被 Yahoo 拒絕連線
     headers = {
         "User-Agent":
-            "Mozilla/5.0"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36",
+
+        "Accept":
+            "text/html,application/xhtml+xml,application/json"
     }
 
     try:
 
         r = requests.get(
             url,
-            params=params,
             headers=headers,
             timeout=10
         )
@@ -516,44 +917,15 @@ def get_price_from_yahoo():
 
         data = r.json()
 
-        result = (
-            data
-            .get("chart", {})
-            .get("result")
+        return (
+            data["chart"]["result"][0]
+            ["meta"]["regularMarketPrice"]
         )
 
-        if not result:
-            return None
-
-        meta = result[0].get(
-            "meta",
-            {}
-        )
-
-        price = (
-            meta.get(
-                "regularMarketPrice"
-            )
-        )
-
-        if price is not None:
-
-            return float(price)
+    except:
 
         return None
 
-    except Exception as e:
-
-        print(
-            f"Yahoo 股價取得失敗：{e}"
-        )
-
-        return None
-
-
-# =========================================================
-# FinMind 股價
-# =========================================================
 
 def get_price_from_finmind():
 
@@ -565,10 +937,7 @@ def get_price_from_finmind():
     params = {
         "dataset": "TaiwanStockPrice",
         "data_id": "2330",
-        "start_date": (
-            datetime.now()
-            .strftime("%Y-%m-%d")
-        )
+        "start_date": "2024-01-01"
     }
 
     try:
@@ -579,965 +948,409 @@ def get_price_from_finmind():
             timeout=10
         )
 
-        if r.status_code != 200:
-            return None
+        return r.json()["data"][-1]["close"]
 
-        data = r.json()
-
-        records = data.get(
-            "data",
-            []
-        )
-
-        if not records:
-            return None
-
-        price = records[-1].get(
-            "close"
-        )
-
-        if price is not None:
-
-            return float(price)
+    except:
 
         return None
 
-    except Exception as e:
-
-        print(
-            f"FinMind 股價取得失敗：{e}"
-        )
-
-        return None
-
-
-# =========================================================
-# 取得台積電股價
-# =========================================================
 
 def get_tsmc_price():
 
     price = get_price_from_yahoo()
 
     if price is not None:
-
         return price
 
     price = get_price_from_finmind()
 
-    return price
+    if price is not None:
+        return price
 
+    raise Exception("❌ 無法取得股價")
 
-# =========================================================
-# 台積電估值資料
-# =========================================================
 
-def get_tsmc_valuation():
+# ------------------------------
+# Cloudflare KV 與 LINE 推播
+# ------------------------------
+def get_all_user_ids_from_cloudflare():
 
-    # -----------------------------------------------------
-    # 1. Yahoo Finance：取得本益比、PEG
-    # -----------------------------------------------------
-
-    yahoo_url = (
-        "https://finance.yahoo.com/"
-        "quote/2330.TW/"
-    )
-
-    headers = {
-        "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-    }
-
-    pe = None
-    peg = None
-
-    try:
-
-        r = requests.get(
-            yahoo_url,
-            headers=headers,
-            timeout=10
-        )
-
-        print(
-            f"📊 Yahoo 估值頁面 HTTP 狀態："
-            f"{r.status_code}"
-        )
-
-        if r.status_code == 200:
-
-            html = r.text
-
-            # -------------------------------------------------
-            # 抓取 Trailing P/E
-            # -------------------------------------------------
-
-            patterns_pe = [
-
-                r'"trailingPE":\{"raw":([0-9.]+)',
-
-                r'"trailingPE":([0-9.]+)',
-
-                r'PE Ratio \(TTM\)</span>.*?'
-                r'([0-9]+\.[0-9]+)'
-
-            ]
-
-            for pattern in patterns_pe:
-
-                match = re.search(
-                    pattern,
-                    html,
-                    re.IGNORECASE |
-                    re.DOTALL
-                )
-
-                if match:
-
-                    try:
-
-                        pe = float(
-                            match.group(1)
-                        )
-
-                        break
-
-                    except:
-
-                        pass
-
-            # -------------------------------------------------
-            # 抓取 PEG Ratio
-            # -------------------------------------------------
-
-            patterns_peg = [
-
-                r'"pegRatio":\{"raw":([0-9.]+)',
-
-                r'"pegRatio":([0-9.]+)',
-
-                r'PEG Ratio \(5yr expected\).*?'
-                r'([0-9]+\.[0-9]+)'
-
-            ]
-
-            for pattern in patterns_peg:
-
-                match = re.search(
-                    pattern,
-                    html,
-                    re.IGNORECASE |
-                    re.DOTALL
-                )
-
-                if match:
-
-                    try:
-
-                        peg = float(
-                            match.group(1)
-                        )
-
-                        break
-
-                    except:
-
-                        pass
-
-    except Exception as e:
-
-        print(
-            f"❌ Yahoo 估值資料取得失敗："
-            f"{e}"
-        )
-
-    # -----------------------------------------------------
-    # 2. Yahoo 台股 EPS 頁面
-    #    取得最新一季 EPS 年增率
-    # -----------------------------------------------------
-
-    eps_url = (
-        "https://tw.finance.yahoo.com/"
-        "quote/2330/eps"
-    )
-
-    eps_growth = None
-
-    try:
-
-        r = requests.get(
-            eps_url,
-            headers=headers,
-            timeout=10
-        )
-
-        print(
-            f"📊 Yahoo EPS 頁面 HTTP 狀態："
-            f"{r.status_code}"
-        )
-
-        if r.status_code == 200:
-
-            html = r.text
-
-            # -------------------------------------------------
-            # 優先抓目前最新一季的 EPS 年增率
-            #
-            # 目前 Yahoo 台股頁面：
-            # 2026 Q2 EPS 27.25
-            # 年增率 77.41%
-            # -------------------------------------------------
-
-            patterns_growth = [
-
-                r'2026 Q2.*?'
-                r'27\.25.*?'
-                r'77\.41%',
-
-                r'77\.41%'
-
-            ]
-
-            for pattern in patterns_growth:
-
-                match = re.search(
-                    pattern,
-                    html,
-                    re.IGNORECASE |
-                    re.DOTALL
-                )
-
-                if match:
-
-                    eps_growth = 77.41
-
-                    break
-
-            # -------------------------------------------------
-            # 如果沒有抓到 77.41
-            # 再嘗試抓頁面中的百分比
-            # -------------------------------------------------
-
-            if eps_growth is None:
-
-                patterns_fallback = [
-
-                    r'年增率.*?'
-                    r'([0-9]+\.[0-9]+)%',
-
-                    r'YoY.*?'
-                    r'([0-9]+\.[0-9]+)%',
-
-                    r'([0-9]+\.[0-9]+)%'
-
-                ]
-
-                for pattern in patterns_fallback:
-
-                    matches = re.findall(
-                        pattern,
-                        html,
-                        re.IGNORECASE |
-                        re.DOTALL
-                    )
-
-                    if matches:
-
-                        try:
-
-                            eps_growth = float(
-                                matches[0]
-                            )
-
-                            break
-
-                        except:
-
-                            pass
-
-    except Exception as e:
-
-        print(
-            f"❌ Yahoo EPS 資料取得失敗："
-            f"{e}"
-        )
-
-    # -----------------------------------------------------
-    # 顯示解析結果
-    # -----------------------------------------------------
-
-    print(
-        f"📊 台積電估值解析："
-        f"PE={pe}, "
-        f"EPS Growth={eps_growth}%, "
-        f"PEG={peg}"
-    )
-
-    return (
-        pe,
-        eps_growth,
-        peg
-    )
-
-
-# =========================================================
-# 取得歷史股價
-# =========================================================
-
-def get_tsmc_history():
-
-    url = (
-        "https://query1.finance.yahoo.com/"
-        "v8/finance/chart/2330.TW"
-    )
-
-    params = {
-        "range": "3mo",
-        "interval": "1d"
-    }
-
-    headers = {
-        "User-Agent":
-            "Mozilla/5.0"
-    }
-
-    try:
-
-        r = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=10
-        )
-
-        if r.status_code != 200:
-            return []
-
-        data = r.json()
-
-        result = (
-            data
-            .get("chart", {})
-            .get("result")
-        )
-
-        if not result:
-            return []
-
-        closes = (
-            result[0]
-            .get("indicators", {})
-            .get("quote", [{}])[0]
-            .get("close", [])
-        )
-
-        return [
-            float(x)
-            for x in closes
-            if x is not None
-        ]
-
-    except Exception as e:
-
-        print(
-            f"歷史股價取得失敗：{e}"
-        )
-
+    if not all([
+        CF_ACCOUNT_ID,
+        CF_API_TOKEN,
+        CF_KV_NAMESPACE_ID
+    ]):
         return []
 
-
-# =========================================================
-# RSI
-# =========================================================
-
-def calculate_rsi(
-    prices,
-    period=14
-):
-
-    if len(prices) <= period:
-        return None
-
-    gains = []
-    losses = []
-
-    for i in range(
-        1,
-        len(prices)
-    ):
-
-        change = (
-            prices[i] -
-            prices[i - 1]
-        )
-
-        if change > 0:
-
-            gains.append(change)
-            losses.append(0)
-
-        else:
-
-            gains.append(0)
-            losses.append(
-                abs(change)
-            )
-
-    avg_gain = (
-        sum(gains[-period:]) /
-        period
-    )
-
-    avg_loss = (
-        sum(losses[-period:]) /
-        period
-    )
-
-    if avg_loss == 0:
-        return 100.0
-
-    rs = (
-        avg_gain /
-        avg_loss
-    )
-
-    rsi = (
-        100 -
-        (100 / (1 + rs))
-    )
-
-    return round(
-        rsi,
-        2
-    )
-
-
-# =========================================================
-# 20 日乖離率
-# =========================================================
-
-def calculate_bias(
-    prices,
-    period=20
-):
-
-    if len(prices) < period:
-        return None
-
-    ma = (
-        sum(prices[-period:]) /
-        period
-    )
-
-    current = prices[-1]
-
-    bias = (
-        (current - ma) /
-        ma *
-        100
-    )
-
-    return round(
-        bias,
-        2
-    )
-
-
-# =========================================================
-# Cloudflare KV
-# =========================================================
-
-def get_kv(key):
-
     url = (
-        f"https://api.cloudflare.com/"
-        f"client/v4/accounts/"
-        f"{CF_ACCOUNT_ID}/storage/"
-        f"kv/namespaces/"
-        f"{CF_KV_NAMESPACE_ID}/values/"
-        f"{key}"
-    )
-
-    headers = {
-        "Authorization":
-            f"Bearer {CF_API_TOKEN}"
-    }
-
-    try:
-
-        r = requests.get(
-            url,
-            headers=headers,
-            timeout=10
-        )
-
-        if r.status_code == 200:
-            return r.text
-
-        return None
-
-    except Exception as e:
-
-        print(
-            f"KV 讀取失敗：{e}"
-        )
-
-        return None
-
-
-def set_kv(
-    key,
-    value
-):
-
-    url = (
-        f"https://api.cloudflare.com/"
-        f"client/v4/accounts/"
-        f"{CF_ACCOUNT_ID}/storage/"
-        f"kv/namespaces/"
-        f"{CF_KV_NAMESPACE_ID}/values/"
-        f"{key}"
+        f"https://api.cloudflare.com/client/v4/"
+        f"accounts/{CF_ACCOUNT_ID}/storage/kv/"
+        f"namespaces/{CF_KV_NAMESPACE_ID}/keys"
     )
 
     headers = {
         "Authorization":
             f"Bearer {CF_API_TOKEN}",
+
         "Content-Type":
-            "text/plain"
+            "application/json"
     }
 
-    try:
+    user_ids = []
 
-        r = requests.put(
-            url,
-            headers=headers,
-            data=value,
-            timeout=10
-        )
+    cursor = None
 
-        return (
-            r.status_code == 200
-        )
+    while True:
 
-    except Exception as e:
+        params = {
+            "limit": 1000
+        }
 
-        print(
-            f"KV 寫入失敗：{e}"
-        )
+        if cursor:
+            params["cursor"] = cursor
 
-        return False
+        try:
+
+            r = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+
+            data = r.json()
+
+            if not data.get("success"):
+                break
+
+            user_ids.extend([
+                item["name"]
+                for item in data["result"]
+            ])
+
+            cursor = data[
+                "result_info"
+            ].get("cursor")
+
+            if not cursor:
+                break
+
+        except:
+
+            break
+
+    return user_ids
 
 
-# =========================================================
-# LINE Multicast
-# =========================================================
-
-def send_line_multicast(
+def send_line_message_to_all(
+    user_ids,
     message
 ):
 
+    if not user_ids or not message:
+        return
+
     url = (
-        "https://api.line.me/v2/bot/"
-        "message/multicast"
+        "https://api.line.me/"
+        "v2/bot/message/multicast"
     )
 
     headers = {
         "Content-Type":
             "application/json",
+
         "Authorization":
             f"Bearer {CHANNEL_ACCESS_TOKEN}"
     }
 
-    user_ids_text = get_kv(
-        "line_user_ids"
-    )
+    for i in range(
+        0,
+        len(user_ids),
+        500
+    ):
 
-    if not user_ids_text:
-
-        print(
-            "沒有 LINE 使用者 ID"
-        )
-
-        return
-
-    try:
-
-        user_ids = json.loads(
-            user_ids_text
-        )
-
-    except Exception:
-
-        user_ids = []
-
-    if not user_ids:
-
-        print(
-            "LINE 使用者 ID 清單為空"
-        )
-
-        return
-
-    payload = {
-        "to": user_ids,
-        "messages": [
-            {
-                "type": "text",
-                "text": message
-            }
+        batch_ids = user_ids[
+            i:i + 500
         ]
-    }
 
-    try:
+        body = {
+            "to": batch_ids,
 
-        r = requests.post(
+            "messages": [
+                {
+                    "type": "text",
+                    "text": message
+                }
+            ]
+        }
+
+        response = requests.post(
             url,
             headers=headers,
-            json=payload,
+            json=body,
             timeout=10
         )
 
-        print(
-            f"LINE 發送結果："
-            f"{r.status_code}"
-        )
-
-        if r.status_code != 200:
-
+        if response.status_code >= 300:
             print(
-                r.text
+                f"LINE 推播失敗 HTTP {response.status_code}: "
+                f"{response.text}"
             )
 
-    except Exception as e:
 
-        print(
-            f"LINE 發送失敗：{e}"
-        )
-
-
-# =========================================================
+# ------------------------------
 # 主程式
-# =========================================================
-
+# ------------------------------
 def main():
 
-    now = datetime.now()
-
-    print(
-        f"目前時間：{now}"
+    all_users = (
+        get_all_user_ids_from_cloudflare()
     )
 
-    # =====================================================
-    # 天氣推播
-    # =====================================================
+    if not all_users:
 
-    weather_locations = [
-
-        (
-            "F-D0047-061",
-            "北投區"
-        ),
-
-        (
-            "F-D0047-069",
-            "萬華區"
-        ),
-
-        (
-            "F-D0047-069",
-            "信義區"
-        ),
-
-        (
-            "F-D0047-061",
-            "淡水區"
+        print(
+            "❌ 無法取得用戶 ID，結束運行。"
         )
 
-    ]
+        return
 
-    weather_messages = []
-
-    for dataset_id, location_name in weather_locations:
-
-        data = get_weather_data(
-            dataset_id,
-            location_name
-        )
-
-        if not data:
-
-            weather_messages.append(
-                f"📍 {location_name} "
-                f"天氣資料讀取失敗"
-            )
-
-            continue
-
-        location = parse_location(
-            data,
-            location_name
-        )
-
-        if not location:
-
-            weather_messages.append(
-                f"📍 {location_name} "
-                f"天氣資料解析失敗"
-            )
-
-            continue
-
-        weather = get_weather_description(
-            location
-        )
-
-        min_temp, max_temp = (
-            get_temperature_range(
-                location
-            )
-        )
-
-        rain_probs = (
-            get_rain_probabilities(
-                location
-            )
-        )
-
-        temp_text = ""
-
-        if (
-            min_temp is not None
-            and max_temp is not None
-        ):
-
-            temp_text = (
-                f"{min_temp}~"
-                f"{max_temp}° "
-            )
-
-        message = (
-            f"📍 {location_name} "
-            f"{temp_text}"
-            f"{weather}"
-        )
-
-        for time_str, value in rain_probs:
-
-            message += (
-                f"\n      "
-                f"{time_str}   "
-                f"降雨 {value}%"
-            )
-
-        weather_messages.append(
-            message
-        )
-
-    # =====================================================
-    # 天氣訊息
-    # =====================================================
-
-    weather_msg = (
-        f"🌤 一分鐘報天氣 "
-        f"{now.strftime('%m/%d')} "
-        f"(星期"
-        f"{'一二三四五六日'[now.weekday()]}"
-        f") 🌤\n\n"
-        + "\n".join(
-            weather_messages
-        )
-        + "\n\n"
-        "祝福您吉祥如意闔家平安幸福永相隨。"
+    tw_time = (
+        datetime.utcnow()
+        + timedelta(hours=8)
     )
 
-    # =====================================================
-    # 手動執行時直接發天氣
-    # =====================================================
+    tw_hour = tw_time.hour
 
-    if os.environ.get(
-        "GITHUB_EVENT_NAME"
-    ) == "workflow_dispatch":
+    # GitHub Actions 手動執行時，天氣與股價都推播
+    is_manual_run = (
+        os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    )
 
-        send_line_multicast(
+    if is_manual_run:
+
+        weather_msg = (
+            get_weather_report()
+        )
+
+        send_line_message_to_all(
+            all_users,
             weather_msg
         )
 
-    # =====================================================
-    # 每日天氣時間
-    # =====================================================
+    # --------------------------------------------------
+    # 早上 5 點（或排程微小延遲的 6 點）
+    # 只發送一次氣象，絕不重疊
+    # --------------------------------------------------
+    if (tw_hour == 5 or tw_hour == 6) and not is_manual_run:
 
-    if now.hour in [
-        5,
-        6
-    ]:
+        weather_msg = (
+            get_weather_report()
+        )
 
-        send_line_multicast(
+        send_line_message_to_all(
+            all_users,
             weather_msg
         )
 
-    # =====================================================
-    # 台積電
-    # =====================================================
+    # --------------------------------------------------
+    # 下午 1 點以後
+    # 13:00 ~ 23:59
+    # GitHub Actions 若排程延遲，也仍然執行台積電監控
+    # --------------------------------------------------
+    elif 13 <= tw_hour <= 23 or is_manual_run:
 
-    if (
-        13 <= now.hour <= 23
-        or
-        os.environ.get(
-            "GITHUB_EVENT_NAME"
-        ) == "workflow_dispatch"
-    ):
+        try:
 
-        price = get_tsmc_price()
+            price = get_tsmc_price()
 
-        # -------------------------------------------------
-        # 取得本益比、EPS 成長率、PEG
-        # -------------------------------------------------
+            rsi_val = None
+            bias_val = None
 
-        pe_val, eps_growth_val, peg_val = (
-            get_tsmc_valuation()
-        )
+            # ------------------------------
+            # 計算指標
+            # ------------------------------
+            try:
 
-        rsi_val = None
-        bias_val = None
-
-        history = (
-            get_tsmc_history()
-        )
-
-        if history:
-
-            rsi_val = calculate_rsi(
-                history
-            )
-
-            bias_val = calculate_bias(
-                history
-            )
-
-        # -------------------------------------------------
-        # 估值資訊
-        # -------------------------------------------------
-
-        valuation_lines = []
-
-        if pe_val is not None:
-
-            valuation_lines.append(
-                f"本益比："
-                f"{pe_val:.1f} 倍"
-            )
-
-        if eps_growth_val is not None:
-
-            valuation_lines.append(
-                f"EPS 成長率："
-                f"{eps_growth_val:.1f}%"
-            )
-
-        if peg_val is not None:
-
-            valuation_lines.append(
-                f"PEG："
-                f"{peg_val:.2f}"
-            )
-
-        # -------------------------------------------------
-        # 技術指標
-        # -------------------------------------------------
-
-        technical_parts = []
-
-        if rsi_val is not None:
-
-            technical_parts.append(
-                f"14日RSI: "
-                f"{rsi_val}"
-            )
-
-        if bias_val is not None:
-
-            technical_parts.append(
-                f"20日乖離率: "
-                f"{bias_val}%"
-            )
-
-        indicator_lines = []
-
-        indicator_lines.extend(
-            valuation_lines
-        )
-
-        if technical_parts:
-
-            indicator_lines.append(
-                "、".join(
-                    technical_parts
+                h_url = (
+                    "https://query1.finance.yahoo.com/"
+                    "v8/finance/chart/2330.TW?"
+                    "range=1mo&interval=1d"
                 )
+
+                # 歷史資料同步加入強化 Headers
+                h_headers = {
+                    "User-Agent":
+                        "Mozilla/5.0 "
+                        "(Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36"
+                }
+
+                r_hist = requests.get(
+                    h_url,
+                    headers=h_headers,
+                    timeout=10
+                )
+
+                c = [
+                    x
+                    for x in (
+                        r_hist.json()
+                        ["chart"]["result"][0]
+                        ["indicators"]["quote"][0]
+                        ["close"]
+                    )
+                    if x is not None
+                ]
+
+                if len(c) > 14:
+
+                    d = [
+                        c[i] - c[i - 1]
+                        for i in range(1, len(c))
+                    ]
+
+                    g = (
+                        sum([
+                            x
+                            for x in d[-14:]
+                            if x > 0
+                        ]) / 14
+                    )
+
+                    l = (
+                        sum([
+                            -x
+                            for x in d[-14:]
+                            if x < 0
+                        ]) / 14
+                    )
+
+                    rsi_val = (
+                        round(
+                            100 - (
+                                100 /
+                                (1 + (g / l))
+                            ),
+                            2
+                        )
+                        if l != 0
+                        else 100
+                    )
+
+                if len(c) >= 20:
+
+                    ma20 = (
+                        sum(c[-20:]) / 20
+                    )
+
+                    bias_val = round(
+                        (
+                            (price - ma20)
+                            / ma20
+                        ) * 100,
+                        2
+                    )
+
+            except:
+
+                pass
+
+            # ------------------------------
+            # 組合訊息
+            # ------------------------------
+            indicators = []
+
+            if rsi_val is not None:
+
+                indicators.append(
+                    f"14日RSI: {rsi_val}"
+                )
+
+            if bias_val is not None:
+
+                indicators.append(
+                    f"20日乖離率: {bias_val}%"
+                )
+
+            indicator_str = (
+                f" ({'、'.join(indicators)})"
+                if indicators
+                else ""
             )
-
-        indicator_str = (
-            "\n".join(
-                indicator_lines
-            )
-        )
-
-        # -------------------------------------------------
-        # 超過目標價
-        # -------------------------------------------------
-
-        overheat_note = ""
-
-        if (
-            price is not None
-            and price >= TSMC_TARGET_PRICE
-        ):
 
             overheat_note = (
-                f"\n\n⚠️ 台積電目前股價"
-                f"{price} 元，"
-                f"已達到設定目標價 "
-                f"{TSMC_TARGET_PRICE} 元"
+                "\n目前指標過熱！"
+                if (
+                    (
+                        rsi_val
+                        and rsi_val > 75
+                    )
+                    or
+                    (
+                        bias_val
+                        and bias_val > 10
+                    )
+                )
+                else ""
             )
 
-        # -------------------------------------------------
-        # 每日台積電訊息
-        # -------------------------------------------------
+            # ------------------------------
+            # 達標通知
+            # ------------------------------
+            if price >= TSMC_TARGET_PRICE:
 
-        if price is not None:
+                msg = (
+                    f"📈 台積電股價已達 "
+                    f"{price} 元！"
+                    f"{indicator_str}\n"
+                    f"（提醒門檻："
+                    f"{TSMC_TARGET_PRICE}）"
+                    f"{overheat_note}"
+                )
 
+                send_line_message_to_all(
+                    all_users,
+                    msg
+                )
+
+            # ------------------------------
+            # 每日收盤行情
+            # ------------------------------
             daily_msg = (
                 f"📢 tsmc 今日收盤價："
                 f"{price} 元"
+                f"{indicator_str}"
+                f"{overheat_note}"
             )
 
-            if indicator_str:
-
-                daily_msg += (
-                    "\n"
-                    +
-                    indicator_str
-                )
-
-            daily_msg += (
-                overheat_note
+            send_line_message_to_all(
+                all_users,
+                daily_msg
             )
+
+        except Exception as e:
 
             print(
-                daily_msg
+                f"股市監控失敗: {e}"
             )
 
-            send_line_multicast(
-                daily_msg
-            )
+    # --------------------------------------------------
+    # 其他時間
+    # 例如深夜手動按下 Run 測試
+    # 只單純推播天氣
+    # --------------------------------------------------
+    else:
 
+        weather_msg = (
+            get_weather_report()
+        )
 
-# =========================================================
-# 執行
-# =========================================================
+        send_line_message_to_all(
+            all_users,
+            weather_msg
+        )
+
 
 if __name__ == "__main__":
-
     main()
