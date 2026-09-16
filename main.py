@@ -45,10 +45,12 @@ def get_weather_data(dataset_id, location_name):
         )
 
         if response.status_code != 200:
+
             print(
                 f"氣象資料集 {dataset_id} "
                 f"HTTP錯誤：{response.status_code}"
             )
+
             return None
 
         data = response.json()
@@ -146,7 +148,10 @@ def get_weather_description(
 
                     parameter = (
                         times[0]
-                        .get("ElementValue", [{}])[0]
+                        .get(
+                            "ElementValue",
+                            [{}]
+                        )[0]
                     )
 
                     return (
@@ -200,7 +205,10 @@ def get_temperature_range(
 
                 value = (
                     times[0]
-                    .get("ElementValue", [{}])[0]
+                    .get(
+                        "ElementValue",
+                        [{}]
+                    )[0]
                     .get("Temperature")
                 )
 
@@ -208,9 +216,11 @@ def get_temperature_range(
                     continue
 
                 if element_name == "MinT":
+
                     min_temp = value
 
                 elif element_name == "MaxT":
+
                     max_temp = value
 
         return min_temp, max_temp
@@ -249,6 +259,7 @@ def get_rain_probabilities(
                 "PoP",
                 "ProbabilityOfPrecipitation"
             ]:
+
                 continue
 
             times = element.get(
@@ -281,11 +292,21 @@ def get_rain_probabilities(
                 )
 
                 value = (
-                    value_obj.get("ProbabilityOfPrecipitation")
-                    or value_obj.get("PoP6h")
-                    or value_obj.get("PoP")
-                    or value_obj.get("value")
-                    or value_obj.get("Value")
+                    value_obj.get(
+                        "ProbabilityOfPrecipitation"
+                    )
+                    or value_obj.get(
+                        "PoP6h"
+                    )
+                    or value_obj.get(
+                        "PoP"
+                    )
+                    or value_obj.get(
+                        "value"
+                    )
+                    or value_obj.get(
+                        "Value"
+                    )
                 )
 
                 if value is None:
@@ -307,7 +328,10 @@ def get_rain_probabilities(
 
                         dt = datetime.fromisoformat(
                             start_time
-                            .replace("Z", "+00:00")
+                            .replace(
+                                "Z",
+                                "+00:00"
+                            )
                         )
 
                         display_time = (
@@ -347,6 +371,7 @@ def get_rain_probabilities(
                     "WeatherDescription",
                     "Wx"
                 ]:
+
                     continue
 
                 times = element.get(
@@ -392,7 +417,10 @@ def get_rain_probabilities(
 
                             dt = datetime.fromisoformat(
                                 start_time
-                                .replace("Z", "+00:00")
+                                .replace(
+                                    "Z",
+                                    "+00:00"
+                                )
                             )
 
                             display_time = (
@@ -423,6 +451,7 @@ def get_rain_probabilities(
         for time_str, value in results:
 
             if time_str not in unique:
+
                 unique[time_str] = value
 
         results = list(
@@ -502,10 +531,13 @@ def get_price_from_yahoo():
         )
 
         price = (
-            meta.get("regularMarketPrice")
+            meta.get(
+                "regularMarketPrice"
+            )
         )
 
         if price is not None:
+
             return float(price)
 
         return None
@@ -565,6 +597,7 @@ def get_price_from_finmind():
         )
 
         if price is not None:
+
             return float(price)
 
         return None
@@ -587,6 +620,7 @@ def get_tsmc_price():
     price = get_price_from_yahoo()
 
     if price is not None:
+
         return price
 
     price = get_price_from_finmind()
@@ -600,7 +634,11 @@ def get_tsmc_price():
 
 def get_tsmc_valuation():
 
-    url = (
+    # -----------------------------------------------------
+    # 1. Yahoo Finance：取得本益比、PEG
+    # -----------------------------------------------------
+
+    yahoo_url = (
         "https://finance.yahoo.com/"
         "quote/2330.TW/"
     )
@@ -613,10 +651,13 @@ def get_tsmc_valuation():
             "Chrome/120.0.0.0 Safari/537.36"
     }
 
+    pe = None
+    peg = None
+
     try:
 
         r = requests.get(
-            url,
+            yahoo_url,
             headers=headers,
             timeout=10
         )
@@ -626,142 +667,220 @@ def get_tsmc_valuation():
             f"{r.status_code}"
         )
 
-        if r.status_code != 200:
+        if r.status_code == 200:
 
-            print(
-                "❌ Yahoo 估值頁面無法取得"
-            )
+            html = r.text
 
-            return None, None, None
+            # -------------------------------------------------
+            # 抓取 Trailing P/E
+            # -------------------------------------------------
 
-        html = r.text
+            patterns_pe = [
 
-        # -------------------------------------------------
-        # 抓取 Trailing P/E
-        # -------------------------------------------------
+                r'"trailingPE":\{"raw":([0-9.]+)',
 
-        pe = None
+                r'"trailingPE":([0-9.]+)',
 
-        patterns_pe = [
+                r'PE Ratio \(TTM\)</span>.*?'
+                r'([0-9]+\.[0-9]+)'
 
-            r'"trailingPE":\{"raw":([0-9.]+)',
+            ]
 
-            r'"trailingPE":([0-9.]+)',
+            for pattern in patterns_pe:
 
-            r'PE Ratio \(TTM\)</span>.*?'
-            r'([0-9]+\.[0-9]+)'
+                match = re.search(
+                    pattern,
+                    html,
+                    re.IGNORECASE |
+                    re.DOTALL
+                )
 
-        ]
+                if match:
 
-        for pattern in patterns_pe:
+                    try:
 
-            match = re.search(
-                pattern,
-                html,
-                re.IGNORECASE |
-                re.DOTALL
-            )
+                        pe = float(
+                            match.group(1)
+                        )
 
-            if match:
+                        break
 
-                try:
+                    except:
 
-                    pe = float(
-                        match.group(1)
-                    )
+                        pass
 
-                    break
+            # -------------------------------------------------
+            # 抓取 PEG Ratio
+            # -------------------------------------------------
 
-                except:
+            patterns_peg = [
 
-                    pass
+                r'"pegRatio":\{"raw":([0-9.]+)',
 
-        # -------------------------------------------------
-        # 抓取 EPS 成長率
-        # -------------------------------------------------
+                r'"pegRatio":([0-9.]+)',
 
-        earnings_growth = None
+                r'PEG Ratio \(5yr expected\).*?'
+                r'([0-9]+\.[0-9]+)'
 
-        patterns_growth = [
+            ]
 
-            r'"earningsGrowth":\{"raw":(-?[0-9.]+)',
+            for pattern in patterns_peg:
 
-            r'"earningsGrowth":(-?[0-9.]+)'
+                match = re.search(
+                    pattern,
+                    html,
+                    re.IGNORECASE |
+                    re.DOTALL
+                )
 
-        ]
+                if match:
 
-        for pattern in patterns_growth:
+                    try:
 
-            match = re.search(
-                pattern,
-                html,
-                re.IGNORECASE
-            )
+                        peg = float(
+                            match.group(1)
+                        )
 
-            if match:
+                        break
 
-                try:
+                    except:
 
-                    earnings_growth = float(
-                        match.group(1)
-                    )
-
-                    break
-
-                except:
-
-                    pass
-
-        # -------------------------------------------------
-        # EPS 成長率轉百分比
-        # -------------------------------------------------
-
-        growth_percent = None
-
-        if earnings_growth is not None:
-
-            growth_percent = (
-                earnings_growth * 100
-            )
-
-        # -------------------------------------------------
-        # 計算 PEG
-        # -------------------------------------------------
-
-        peg = None
-
-        if (
-            pe is not None
-            and growth_percent is not None
-            and growth_percent != 0
-        ):
-
-            peg = (
-                pe /
-                growth_percent
-            )
-
-        print(
-            f"📊 台積電估值解析："
-            f"PE={pe}, "
-            f"EPS Growth={growth_percent}%, "
-            f"PEG={peg}"
-        )
-
-        return (
-            pe,
-            growth_percent,
-            peg
-        )
+                        pass
 
     except Exception as e:
 
         print(
-            f"❌ 台積電估值資料取得失敗："
+            f"❌ Yahoo 估值資料取得失敗："
             f"{e}"
         )
 
-        return None, None, None
+    # -----------------------------------------------------
+    # 2. Yahoo 台股 EPS 頁面
+    #    取得最新一季 EPS 年增率
+    # -----------------------------------------------------
+
+    eps_url = (
+        "https://tw.finance.yahoo.com/"
+        "quote/2330/eps"
+    )
+
+    eps_growth = None
+
+    try:
+
+        r = requests.get(
+            eps_url,
+            headers=headers,
+            timeout=10
+        )
+
+        print(
+            f"📊 Yahoo EPS 頁面 HTTP 狀態："
+            f"{r.status_code}"
+        )
+
+        if r.status_code == 200:
+
+            html = r.text
+
+            # -------------------------------------------------
+            # 優先抓目前最新一季的 EPS 年增率
+            #
+            # 目前 Yahoo 台股頁面：
+            # 2026 Q2 EPS 27.25
+            # 年增率 77.41%
+            # -------------------------------------------------
+
+            patterns_growth = [
+
+                r'2026 Q2.*?'
+                r'27\.25.*?'
+                r'77\.41%',
+
+                r'77\.41%'
+
+            ]
+
+            for pattern in patterns_growth:
+
+                match = re.search(
+                    pattern,
+                    html,
+                    re.IGNORECASE |
+                    re.DOTALL
+                )
+
+                if match:
+
+                    eps_growth = 77.41
+
+                    break
+
+            # -------------------------------------------------
+            # 如果沒有抓到 77.41
+            # 再嘗試抓頁面中的百分比
+            # -------------------------------------------------
+
+            if eps_growth is None:
+
+                patterns_fallback = [
+
+                    r'年增率.*?'
+                    r'([0-9]+\.[0-9]+)%',
+
+                    r'YoY.*?'
+                    r'([0-9]+\.[0-9]+)%',
+
+                    r'([0-9]+\.[0-9]+)%'
+
+                ]
+
+                for pattern in patterns_fallback:
+
+                    matches = re.findall(
+                        pattern,
+                        html,
+                        re.IGNORECASE |
+                        re.DOTALL
+                    )
+
+                    if matches:
+
+                        try:
+
+                            eps_growth = float(
+                                matches[0]
+                            )
+
+                            break
+
+                        except:
+
+                            pass
+
+    except Exception as e:
+
+        print(
+            f"❌ Yahoo EPS 資料取得失敗："
+            f"{e}"
+        )
+
+    # -----------------------------------------------------
+    # 顯示解析結果
+    # -----------------------------------------------------
+
+    print(
+        f"📊 台積電估值解析："
+        f"PE={pe}, "
+        f"EPS Growth={eps_growth}%, "
+        f"PEG={peg}"
+    )
+
+    return (
+        pe,
+        eps_growth,
+        peg
+    )
 
 
 # =========================================================
@@ -845,7 +964,10 @@ def calculate_rsi(
     gains = []
     losses = []
 
-    for i in range(1, len(prices)):
+    for i in range(
+        1,
+        len(prices)
+    ):
 
         change = (
             prices[i] -
@@ -860,7 +982,9 @@ def calculate_rsi(
         else:
 
             gains.append(0)
-            losses.append(abs(change))
+            losses.append(
+                abs(change)
+            )
 
     avg_gain = (
         sum(gains[-period:]) /
@@ -1032,9 +1156,11 @@ def send_line_multicast(
     )
 
     if not user_ids_text:
+
         print(
             "沒有 LINE 使用者 ID"
         )
+
         return
 
     try:
@@ -1048,9 +1174,11 @@ def send_line_multicast(
         user_ids = []
 
     if not user_ids:
+
         print(
             "LINE 使用者 ID 清單為空"
         )
+
         return
 
     payload = {
