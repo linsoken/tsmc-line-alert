@@ -294,6 +294,193 @@ def get_weather_report():
 
             return result
 
+        def get_daily_temperature(elements, names, today_str):
+            # 先嘗試直接讀取 CWA 的 MinT / MaxT 欄位。
+            element = find_element(elements, names)
+            if element:
+                for item in element.get("Time", []):
+                    check_time = (
+                        parse_time(item.get("StartTime"))
+                        or parse_time(item.get("DataTime"))
+                    )
+                    if (
+                        check_time
+                        and check_time.strftime("%Y-%m-%d") == today_str
+                    ):
+                        value = get_element_value(item)
+                        result = get_value_ci(
+                            value,
+                            "MinTemperature", "MinT", "最低溫度",
+                            "MaxTemperature", "MaxT", "最高溫度",
+                            "Temperature", "value", "Value"
+                        )
+                        if result is not None:
+                            return str(result)
+
+            # 有些版本沒有獨立的 MinT / MaxT，
+            # 改用今天逐時溫度計算今日最低 / 最高溫。
+            temperature_element = find_element(
+                elements,
+                ["溫度", "T", "Temperature"]
+            )
+            if temperature_element:
+                values = []
+                for item in temperature_element.get("Time", []):
+                    data_time = parse_time(item.get("DataTime"))
+                    if (
+                        not data_time
+                        or data_time.strftime("%Y-%m-%d") != today_str
+                    ):
+                        continue
+                    value = get_element_value(item)
+                    raw = get_value_ci(
+                        value,
+                        "Temperature", "T", "value", "Value"
+                    )
+                    if raw is None:
+                        continue
+                    try:
+                        values.append(float(raw))
+                    except (TypeError, ValueError):
+                        continue
+
+                if values:
+                    result = (
+                        min(values)
+                        if (
+                            "MinT" in names
+                            or "最低溫度" in names
+                            or "MinTemperature" in names
+                        )
+                        else max(values)
+                    )
+                    return (
+                        str(int(result))
+                        if float(result).is_integer()
+                        else str(result)
+                    )
+
+            return None
+
+        def parse_location(location):
+            district = location.get("LocationName", "")
+            if district not in target_districts:
+                return None
+
+            elements = location.get("WeatherElement", [])
+            if not elements:
+                return None
+
+            # 天氣狀況：維持原本抓目前時段的方式。
+            desc_el = find_element(
+                elements,
+                ["天氣預報綜合描述", "WeatherDescription"]
+            )
+            weather_desc = ""
+            if desc_el:
+                current = find_current_time_data(
+                    desc_el.get("Time", [])
+                )
+                if current:
+                    value = get_element_value(current)
+                    weather_desc = get_value_ci(
+                        value,
+                        "WeatherDescription",
+                        "Description",
+                        "weatherDescription",
+                        "value",
+                        "Value"
+                    ) or ""
+                    if not isinstance(weather_desc, str):
+                        weather_desc = str(weather_desc)
+
+            weather = ""
+            if weather_desc:
+                weather = weather_desc.split("。")[0].strip()
+
+            if not weather:
+                wx_el = find_element(
+                    elements,
+                    ["天氣現象", "Wx", "Weather"]
+                )
+                if wx_el:
+                    current = find_current_time_data(
+                        wx_el.get("Time", [])
+                    )
+                    if current:
+                        weather = get_value_ci(
+                            get_element_value(current),
+                            "Weather",
+                            "Wx",
+                            "value",
+                            "Value"
+                        ) or ""
+
+            # 今日最高 / 最低溫度。
+            min_temp = max_temp = None
+            if weather_desc:
+                m = re.search(
+                    r"最低溫度\s*攝氏\s*(-?\d+(?:\.\d+)?)\s*度",
+                    weather_desc
+                )
+                if m:
+                    min_temp = m.group(1)
+
+                m = re.search(
+                    r"最高溫度\s*攝氏\s*(-?\d+(?:\.\d+)?)\s*度",
+                    weather_desc
+                )
+                if m:
+                    max_temp = m.group(1)
+
+            today_str = tw_time.strftime("%Y-%m-%d")
+            if min_temp is None:
+                min_temp = get_daily_temperature(
+                    elements,
+                    ["MinT", "MinTemperature", "最低溫度"],
+                    today_str
+                )
+            if max_temp is None:
+                max_temp = get_daily_temperature(
+                    elements,
+                    ["MaxT", "MaxTemperature", "最高溫度"],
+                    today_str
+                )
+
+            rain_probs = get_rain_probabilities(elements)
+
+            # LINE 顯示格式：
+            # 📍 北投區 25~28° 陰
+            #    07:00 降雨20%
+            #    13:00 降雨30%
+            #    19:00 降雨40%
+            lines = [
+                (
+                    f"📍 {district} "
+                    f"{min_temp if min_temp is not None else '?'}~"
+                    f"{max_temp if max_temp is not None else '?'}° "
+                    f"{weather or '天氣資料讀取中'}"
+                )
+            ]
+
+            # 排版：
+            # 排版：
+            # 使用 5 個半形空格，讓時間再往右一點，對齊行政區名稱下方。
+            # 「降雨」與百分比之間固定 1 個空格。
+            # 📍 北投區 25~28° 多雲
+            #    07:00   降雨 20%
+            #    13:00   降雨 20%
+            #    19:00   降雨 20%
+            for hour in rain_hours:
+                pop = rain_probs.get(hour)
+                pop_text = str(pop) if pop is not None else "?"
+                lines.append(
+                    f"      {hour:02d}:00   降雨 {pop_text}%"
+                )
+
+            return "\n".join(lines)
+
+
         weather_results = {}
 
         for dataset_id in weather_datasets:
