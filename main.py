@@ -151,21 +151,21 @@ def get_weather_report():
             return None
 
         def get_rain_probabilities(elements):
-            """取得 07:00、13:00、19:00 對應的 6 小時降雨機率。
+            """取得 07:00、13:00、19:00 對應的 CWA PoP6h。
 
-            只使用 CWA 的 PoP6h（6 小時降雨機率），不再把 PoP12h
-            或 WeatherDescription 當成替代值，避免不同時段其實抓到
-            同一個 12 小時預報區間。
+            CWA 的 PoP6h 是 6 小時分段：
+              07:00 -> 06:00~12:00
+              13:00 -> 12:00~18:00
+              19:00 -> 18:00~24:00
 
-            例如：
-                07:00 -> 06:00~12:00
-                13:00 -> 12:00~18:00
-                19:00 -> 18:00~24:00
+            這裡只接受 PoP6h，不拿 PoP12h 或 WeatherDescription 冒充。
             """
             result = {hour: None for hour in rain_hours}
 
             def normalize_probability(value):
                 if value is None:
+                    return None
+                if isinstance(value, bool):
                     return None
                 if isinstance(value, (int, float)):
                     return str(int(value)) if float(value).is_integer() else str(value)
@@ -174,18 +174,33 @@ def get_weather_report():
                 return match.group(1) if match else None
 
             def recursive_probability(value):
-                """從 ElementValue 巢狀 dict/list 找 PoP6h。"""
+                """相容 CWA JSON 不同 ElementValue 寫法。"""
                 if isinstance(value, dict):
-                    for key, val in value.items():
-                        key_text = str(key).lower()
-                        if (
-                            key_text == "pop6h"
-                            or key_text == "probabilityofprecipitation"
-                            or "6小時降雨機率" in key_text
-                        ):
-                            found = normalize_probability(val)
+                    # CWA 正常欄位名稱
+                    preferred_keys = (
+                        "ProbabilityOfPrecipitation",
+                        "PoP6h",
+                        "probabilityofprecipitation",
+                        "pop6h",
+                        "6小時降雨機率",
+                    )
+                    for key in preferred_keys:
+                        if key in value:
+                            found = normalize_probability(value[key])
                             if found is not None:
                                 return found
+
+                    # 有些回傳會是 value / Value + measure / Measure
+                    # 只有 measure 明確是百分比時才把 value 當降雨機率。
+                    measure = value.get("measure", value.get("Measure", ""))
+                    raw_value = value.get("value", value.get("Value"))
+                    if raw_value is not None and (
+                        "百分比" in str(measure)
+                        or "%" in str(raw_value)
+                    ):
+                        found = normalize_probability(raw_value)
+                        if found is not None:
+                            return found
 
                     for val in value.values():
                         found = recursive_probability(val)
@@ -201,18 +216,29 @@ def get_weather_report():
                 return None
 
             def item_probability(item):
-                return recursive_probability(item.get("ElementValue"))
+                # 標準 JSON：ElementValue 裡面
+                found = recursive_probability(item.get("ElementValue"))
+                if found is not None:
+                    return found
 
-            # 只找 PoP6h，不再 fallback 到 PoP12h。
+                # 兼容 API 展平欄位：ProbabilityOfPrecipitation 可能直接在 Time 裡
+                for key in (
+                    "ProbabilityOfPrecipitation",
+                    "PoP6h",
+                    "6小時降雨機率",
+                ):
+                    if key in item:
+                        found = normalize_probability(item.get(key))
+                        if found is not None:
+                            return found
+
+                return None
+
+            # 只找 PoP6h 元素。CWA 官方文件定義 PoP6h 為 6 小時分段。
             pop6h_elements = []
             for element in elements:
-                name = str(element.get("ElementName", ""))
-                if (
-                    name == "PoP6h"
-                    or name == "6小時降雨機率"
-                    or "PoP6h" in name
-                    or "6小時降雨機率" in name
-                ):
+                name = str(element.get("ElementName", "")).strip()
+                if name.lower() == "pop6h" or name == "6小時降雨機率":
                     pop6h_elements.append(element)
 
             for element in pop6h_elements:
@@ -231,7 +257,7 @@ def get_weather_report():
                         microsecond=0
                     )
 
-                    # 嚴格依 CWA StartTime ~ EndTime 判斷 6 小時區間。
+                    # 嚴格使用 StartTime <= 目標時間 < EndTime。
                     for item in times:
                         start = parse_time(item.get("StartTime"))
                         end = parse_time(item.get("EndTime"))
@@ -244,193 +270,29 @@ def get_weather_report():
                                 result[hour] = value
                                 break
 
+                    # 如果 CWA 此版本的 JSON 沒有 StartTime/EndTime，
+                    # 才使用 DataTime 對應；仍然只使用 PoP6h 元素。
+                    if result[hour] is None:
+                        candidates = []
+                        for item in times:
+                            data_time = parse_time(item.get("DataTime"))
+                            if data_time is not None and data_time <= target_time:
+                                value = item_probability(item)
+                                if value is not None:
+                                    candidates.append((data_time, value))
+                        if candidates:
+                            candidates.sort(key=lambda x: x[0])
+                            result[hour] = candidates[-1][1]
+
+            # 安全診斷：如果完全找不到 PoP6h，只印元素名稱，
+            # 不印 API Key 或任何敏感資訊，方便 GitHub Actions 查原因。
+            if not pop6h_elements:
+                print(
+                    "⚠️ CWA 回傳資料中找不到 PoP6h；收到的 ElementName：",
+                    [str(e.get("ElementName", "")) for e in elements]
+                )
+
             return result
-
-        def get_daily_temperature(elements, names, today_str):
-            # 先嘗試直接讀取 CWA 的 MinT / MaxT 欄位。
-            element = find_element(elements, names)
-            if element:
-                for item in element.get("Time", []):
-                    check_time = (
-                        parse_time(item.get("StartTime"))
-                        or parse_time(item.get("DataTime"))
-                    )
-                    if (
-                        check_time
-                        and check_time.strftime("%Y-%m-%d") == today_str
-                    ):
-                        value = get_element_value(item)
-                        result = get_value_ci(
-                            value,
-                            "MinTemperature", "MinT", "最低溫度",
-                            "MaxTemperature", "MaxT", "最高溫度",
-                            "Temperature", "value", "Value"
-                        )
-                        if result is not None:
-                            return str(result)
-
-            # 有些版本沒有獨立的 MinT / MaxT，
-            # 改用今天逐時溫度計算今日最低 / 最高溫。
-            temperature_element = find_element(
-                elements,
-                ["溫度", "T", "Temperature"]
-            )
-            if temperature_element:
-                values = []
-                for item in temperature_element.get("Time", []):
-                    data_time = parse_time(item.get("DataTime"))
-                    if (
-                        not data_time
-                        or data_time.strftime("%Y-%m-%d") != today_str
-                    ):
-                        continue
-                    value = get_element_value(item)
-                    raw = get_value_ci(
-                        value,
-                        "Temperature", "T", "value", "Value"
-                    )
-                    if raw is None:
-                        continue
-                    try:
-                        values.append(float(raw))
-                    except (TypeError, ValueError):
-                        continue
-
-                if values:
-                    result = (
-                        min(values)
-                        if (
-                            "MinT" in names
-                            or "最低溫度" in names
-                            or "MinTemperature" in names
-                        )
-                        else max(values)
-                    )
-                    return (
-                        str(int(result))
-                        if float(result).is_integer()
-                        else str(result)
-                    )
-
-            return None
-
-        def parse_location(location):
-            district = location.get("LocationName", "")
-            if district not in target_districts:
-                return None
-
-            elements = location.get("WeatherElement", [])
-            if not elements:
-                return None
-
-            # 天氣狀況：維持原本抓目前時段的方式。
-            desc_el = find_element(
-                elements,
-                ["天氣預報綜合描述", "WeatherDescription"]
-            )
-            weather_desc = ""
-            if desc_el:
-                current = find_current_time_data(
-                    desc_el.get("Time", [])
-                )
-                if current:
-                    value = get_element_value(current)
-                    weather_desc = get_value_ci(
-                        value,
-                        "WeatherDescription",
-                        "Description",
-                        "weatherDescription",
-                        "value",
-                        "Value"
-                    ) or ""
-                    if not isinstance(weather_desc, str):
-                        weather_desc = str(weather_desc)
-
-            weather = ""
-            if weather_desc:
-                weather = weather_desc.split("。")[0].strip()
-
-            if not weather:
-                wx_el = find_element(
-                    elements,
-                    ["天氣現象", "Wx", "Weather"]
-                )
-                if wx_el:
-                    current = find_current_time_data(
-                        wx_el.get("Time", [])
-                    )
-                    if current:
-                        weather = get_value_ci(
-                            get_element_value(current),
-                            "Weather",
-                            "Wx",
-                            "value",
-                            "Value"
-                        ) or ""
-
-            # 今日最高 / 最低溫度。
-            min_temp = max_temp = None
-            if weather_desc:
-                m = re.search(
-                    r"最低溫度\s*攝氏\s*(-?\d+(?:\.\d+)?)\s*度",
-                    weather_desc
-                )
-                if m:
-                    min_temp = m.group(1)
-
-                m = re.search(
-                    r"最高溫度\s*攝氏\s*(-?\d+(?:\.\d+)?)\s*度",
-                    weather_desc
-                )
-                if m:
-                    max_temp = m.group(1)
-
-            today_str = tw_time.strftime("%Y-%m-%d")
-            if min_temp is None:
-                min_temp = get_daily_temperature(
-                    elements,
-                    ["MinT", "MinTemperature", "最低溫度"],
-                    today_str
-                )
-            if max_temp is None:
-                max_temp = get_daily_temperature(
-                    elements,
-                    ["MaxT", "MaxTemperature", "最高溫度"],
-                    today_str
-                )
-
-            rain_probs = get_rain_probabilities(elements)
-
-            # LINE 顯示格式：
-            # 📍 北投區 25~28° 陰
-            #    07:00 降雨20%
-            #    13:00 降雨30%
-            #    19:00 降雨40%
-            lines = [
-                (
-                    f"📍 {district} "
-                    f"{min_temp if min_temp is not None else '?'}~"
-                    f"{max_temp if max_temp is not None else '?'}° "
-                    f"{weather or '天氣資料讀取中'}"
-                )
-            ]
-
-            # 排版：
-            # 排版：
-            # 使用 5 個半形空格，讓時間再往右一點，對齊行政區名稱下方。
-            # 「降雨」與百分比之間固定 1 個空格。
-            # 📍 北投區 25~28° 多雲
-            #    07:00   降雨 20%
-            #    13:00   降雨 20%
-            #    19:00   降雨 20%
-            for hour in rain_hours:
-                pop = rain_probs.get(hour)
-                pop_text = str(pop) if pop is not None else "?"
-                lines.append(
-                    f"      {hour:02d}:00   降雨 {pop_text}%"
-                )
-
-            return "\n".join(lines)
 
         weather_results = {}
 
@@ -440,16 +302,17 @@ def get_weather_report():
                 f"{dataset_id}"
             )
             params = {
-                "Authorization": CWA_API_KEY,
                 "format": "JSON",
-                "LocationName": ",".join(target_districts),
-                # 明確要求 CWA 回傳 PoP6h，避免 API 預設只回傳 3 小時降雨機率。
+                # CWA 官方 API 參數名稱是 locationName（小寫 l）。
+                "locationName": ",".join(target_districts),
+                # 明確要求 6 小時降雨機率，不使用 12 小時 PoP。
                 "elementName": "Wx,PoP6h,WeatherDescription,MinT,MaxT,T"
             }
 
             try:
                 response = requests.get(
                     url,
+                    headers={"Authorization": CWA_API_KEY},
                     params=params,
                     timeout=15
                 )
