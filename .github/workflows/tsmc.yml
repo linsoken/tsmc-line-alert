@@ -2,8 +2,8 @@ name: TSMC Price & Weather Alert
 
 on:
   schedule:
-    # 台灣 05:45（每天執行，包含週末）
-    - cron: "45 5 * * *"
+    # 台灣 05:47（每天執行，包含週末）
+    - cron: "47 5 * * *"
       timezone: "Asia/Taipei"
 
     # 台灣 14:00（週一至週五）
@@ -28,6 +28,12 @@ jobs:
     - name: Install requests
       run: pip install requests
 
+    - name: Show Taiwan time
+      run: |
+        echo "開始執行 Python："
+        TZ=Asia/Taipei date
+        echo "GitHub Event: $GITHUB_EVENT_NAME"
+
     - name: Run script
       env:
         LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
@@ -35,4 +41,7 @@ jobs:
         CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         CF_KV_NAMESPACE_ID: ${{ secrets.CF_KV_NAMESPACE_ID }}
         CWA_API_KEY: ${{ secrets.CWA_API_KEY }}
-      run: python main.py
+      run: |
+        echo "開始執行 main.py："
+        TZ=Asia/Taipei date
+        python main.py
