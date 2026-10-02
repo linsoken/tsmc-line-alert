@@ -2,8 +2,8 @@ name: TSMC Price & Weather Alert
 
 on:
   schedule:
-    # 台灣 05:47（每天執行，包含週末）
-    - cron: "47 5 * * *"
+    # 台灣 05:00（每天執行，包含週末）
+    - cron: "15 5 * * *"
       timezone: "Asia/Taipei"
 
     # 台灣 14:00（週一至週五）
