@@ -6,8 +6,8 @@ on:
     - cron: "0 5 * * *"
       timezone: "Asia/Taipei"
 
-    # 台灣 14:00（週一至週五）
-    - cron: "0 14 * * 1-5"
+    # 台灣 13:45（週一至週五）
+    - cron: "45 13 * * 1-5"
       timezone: "Asia/Taipei"
 
   workflow_dispatch:
