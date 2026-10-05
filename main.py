@@ -11,7 +11,7 @@ CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID")
 CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 CWA_API_KEY = os.environ.get("CWA_API_KEY")
 
-TSMC_TARGET_PRICE = 2500  # 您要通知的價格
+TSMC_TARGET_PRICE = 3000  # 您要通知的價格
 
 
 # ------------------------------
